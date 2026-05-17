@@ -447,7 +447,11 @@ export default function AnimatorApp() {
                 e.preventDefault();
                 const modes = ['EDIT', 'PREVIEW', 'PLAYER_PREVIEW'];
                 const currentIndex = modes.indexOf(uiModeRef.current);
-                setWorkspaceMode(modes[(currentIndex + 1) % modes.length]);
+                if (e.shiftKey) {
+                    setWorkspaceMode(modes[(currentIndex - 1 + modes.length) % modes.length]);
+                } else {
+                    setWorkspaceMode(modes[(currentIndex + 1) % modes.length]);
+                }
                 return;
             }
             if (e.code === 'Space') engine.isSpacePressed = true; 
@@ -2908,9 +2912,9 @@ export default function AnimatorApp() {
                         <span className="text-[8px] text-emerald-400 font-bold tracking-widest">3D GRAPHICS ENGINE</span>
                     </div>
                     <div className="hidden md:flex items-center gap-1.5 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded-md text-slate-400 text-[10px] shadow-inner">
-                        <span>Dica: Pressione</span>
+                        <span>Tip: Press</span>
                         <kbd className="bg-slate-800 text-slate-200 px-1.5 py-0.5 rounded text-[9px] font-mono border border-slate-700 font-bold shadow-sm">TAB</kbd>
-                        <span>para alternar abas rapidamente</span>
+                        <span>to switch tabs quickly</span>
                     </div>
                 </div>
 
