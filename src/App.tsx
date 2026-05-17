@@ -2884,7 +2884,7 @@ export default function AnimatorApp() {
 
     return (
         <div
-            className="flex h-screen w-full bg-slate-900 text-slate-200 font-sans overflow-hidden"
+            className="flex flex-col h-screen w-full bg-slate-900 text-slate-200 font-sans overflow-hidden"
             onPointerDownCapture={handleRangePointerDown}
             onPointerMoveCapture={handleRangePointerMove}
             onPointerUpCapture={stopFineRangeDrag}
@@ -2899,16 +2899,53 @@ export default function AnimatorApp() {
                     {rangeHud.value}
                 </div>
             )}
-            <div className="w-[340px] bg-slate-800 p-5 flex flex-col gap-4 shadow-xl z-10 border-r border-slate-700 overflow-y-auto custom-scrollbar">
-                <div>
-                    <h1 className="text-2xl font-bold text-white mb-1">Animator Pro</h1>
-                    <p className="text-[10px] text-emerald-400 font-semibold tracking-wider">3D ENGINE • DELAUNAY • PADS</p>
+
+            {/* Barra de Navegação Superior Estilo Desktop Suite com Dica de Hotkey */}
+            <div className="bg-slate-950 border-b border-slate-800 px-6 py-2.5 flex items-center justify-between shadow-xl z-30">
+                <div className="flex items-center gap-4">
+                    <div className="flex flex-col">
+                        <h1 className="text-sm font-extrabold text-white tracking-wider uppercase">Animator Pro</h1>
+                        <span className="text-[8px] text-emerald-400 font-bold tracking-widest">3D GRAPHICS ENGINE</span>
+                    </div>
+                    <div className="hidden md:flex items-center gap-1.5 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded-md text-slate-400 text-[10px] shadow-inner">
+                        <span>Dica: Pressione</span>
+                        <kbd className="bg-slate-800 text-slate-200 px-1.5 py-0.5 rounded text-[9px] font-mono border border-slate-700 font-bold shadow-sm">TAB</kbd>
+                        <span>para alternar abas rapidamente</span>
+                    </div>
                 </div>
-                <div className="flex border-b border-slate-700/60 mb-2">
-                    <button onClick={() => setWorkspaceMode('EDIT')} className={`flex-1 py-2 text-[10px] font-bold transition-all border-b-2 -mb-px text-center ${uiMode === 'EDIT' ? 'border-sky-500 text-sky-400 bg-slate-900/30' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/20'}`}>Editor</button>
-                    <button onClick={() => setWorkspaceMode('PREVIEW')} className={`flex-1 py-2 text-[10px] font-bold transition-all border-b-2 -mb-px text-center ${uiMode === 'PREVIEW' ? 'border-rose-500 text-rose-400 bg-slate-900/30' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/20'}`}>Animation</button>
-                    <button onClick={() => setWorkspaceMode('PLAYER_PREVIEW')} className={`flex-1 py-2 text-[10px] font-bold transition-all border-b-2 -mb-px text-center ${uiMode === 'PLAYER_PREVIEW' ? 'border-emerald-500 text-emerald-400 bg-slate-900/30' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/20'}`}>Preview</button>
+
+                <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 shadow-inner">
+                    <button 
+                        onClick={() => setWorkspaceMode('EDIT')} 
+                        className={`px-5 py-1.5 rounded-md text-[11px] font-bold tracking-wide transition-all ${uiMode === 'EDIT' ? 'bg-sky-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+                    >
+                        📝 Editor
+                    </button>
+                    <button 
+                        onClick={() => setWorkspaceMode('PREVIEW')} 
+                        className={`px-5 py-1.5 rounded-md text-[11px] font-bold tracking-wide transition-all ${uiMode === 'PREVIEW' ? 'bg-rose-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+                    >
+                        🎬 Animation
+                    </button>
+                    <button 
+                        onClick={() => setWorkspaceMode('PLAYER_PREVIEW')} 
+                        className={`px-5 py-1.5 rounded-md text-[11px] font-bold tracking-wide transition-all ${uiMode === 'PLAYER_PREVIEW' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+                    >
+                        👁️ Preview
+                    </button>
                 </div>
+
+                <div className="text-[9px] text-slate-500 font-bold tracking-widest">
+                    PRO SUITE
+                </div>
+            </div>
+
+            <div className="flex flex-1 min-h-0 w-full overflow-hidden">
+                <div className="w-[340px] bg-slate-800 p-5 flex flex-col gap-4 shadow-xl z-10 border-r border-slate-700 overflow-y-auto custom-scrollbar">
+                    <div>
+                        <h1 className="text-2xl font-bold text-white mb-1">Animator Pro</h1>
+                        <p className="text-[10px] text-emerald-400 font-semibold tracking-wider">3D ENGINE • DELAUNAY • PADS</p>
+                    </div>
 
                 {/* IMPORT */}
                 <div className="bg-slate-700 p-4 rounded-lg space-y-3">
@@ -3462,6 +3499,7 @@ export default function AnimatorApp() {
                     )}
                 </div>
             </div>
+            </div> {/* Fecha o container flex-1 do corpo principal criado para acomodar o cabeçalho superior */}
             
             <style dangerouslySetInnerHTML={{__html: `
                 .custom-scrollbar::-webkit-scrollbar { width: 6px; }
