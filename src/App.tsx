@@ -609,23 +609,13 @@ export default function AnimatorApp() {
     };
 
     const handleWheel = (e) => {
-        if (!canvasRef.current) return;
-        const rect = canvasRef.current.getBoundingClientRect();
-        const screenX = e.clientX - rect.left;
-        const screenY = e.clientY - rect.top;
-        
         const oldZoom = engine.zoom;
         let newZoom = oldZoom + e.deltaY * -0.001;
         newZoom = Math.max(0.2, Math.min(newZoom, 8));
         
-        const cw = canvasRef.current.width / 2;
-        const ch = canvasRef.current.height / 2;
-        
-        const panX = engine.panX || 0;
-        const panY = engine.panY || 0;
-        
-        engine.panX = screenX - cw - (screenX - cw - panX) * (newZoom / oldZoom);
-        engine.panY = screenY - ch - (screenY - ch - panY) * (newZoom / oldZoom);
+        const ratio = newZoom / oldZoom;
+        engine.panX = (engine.panX || 0) * ratio;
+        engine.panY = (engine.panY || 0) * ratio;
         engine.zoom = newZoom;
     };
 
