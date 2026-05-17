@@ -609,24 +609,8 @@ export default function AnimatorApp() {
     };
 
     const handleWheel = (e) => {
-        if (!canvasRef.current) return;
-        const rect = canvasRef.current.getBoundingClientRect();
-        const screenX = e.clientX - rect.left;
-        const screenY = e.clientY - rect.top;
-        
-        const oldZoom = engine.zoom;
-        let newZoom = oldZoom + e.deltaY * -0.001;
-        newZoom = Math.max(0.2, Math.min(newZoom, 8));
-        
-        const cw = canvasRef.current.width / 2;
-        const ch = canvasRef.current.height / 2;
-        
-        const panX = engine.panX || 0;
-        const panY = engine.panY || 0;
-        
-        engine.panX = screenX - cw - (screenX - cw - panX) * (newZoom / oldZoom);
-        engine.panY = screenY - ch - (screenY - ch - panY) * (newZoom / oldZoom);
-        engine.zoom = newZoom;
+        engine.zoom += e.deltaY * -0.001;
+        engine.zoom = Math.max(0.2, Math.min(engine.zoom, 8));
     };
 
     const getPinnedCenter = (item) => {
@@ -2292,7 +2276,6 @@ export default function AnimatorApp() {
             };
 
             const drawPsdLayer = (layer, isActive = false) => {
-                if (layer.visible === false) return;
                 const source = (!isActive && !layer.isStatic && layer.previewSrc) ? layer.previewSrc : layer.imageSrc;
                 const img = layerImageCache.current[source];
                 if (!img || !layer.imageRect) return;
@@ -2335,9 +2318,7 @@ export default function AnimatorApp() {
                     const p1 = engine.verticesCurrent[tri[0]]; const p2 = engine.verticesCurrent[tri[1]]; const p3 = engine.verticesCurrent[tri[2]];
                     const t1 = engine.verticesRest[tri[0]]; const t2 = engine.verticesRest[tri[1]]; const t3 = engine.verticesRest[tri[2]];
 
-                    if (!showWeights && !showDepthMask && !showDepthView) {
-                        if (activeLayer?.visible !== false) drawTexturedTriangle(ctx, engine.image, engine.imageRect, p1, p2, p3, t1, t2, t3);
-                    }
+                    if (!showWeights && !showDepthMask && !showDepthView) drawTexturedTriangle(ctx, engine.image, engine.imageRect, p1, p2, p3, t1, t2, t3);
                     
                     if (wireframe || showWeights || showDepthMask || showDepthView) {
                         ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.lineTo(p3.x, p3.y); ctx.closePath();

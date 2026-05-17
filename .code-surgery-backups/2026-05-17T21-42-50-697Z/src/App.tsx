@@ -609,24 +609,8 @@ export default function AnimatorApp() {
     };
 
     const handleWheel = (e) => {
-        if (!canvasRef.current) return;
-        const rect = canvasRef.current.getBoundingClientRect();
-        const screenX = e.clientX - rect.left;
-        const screenY = e.clientY - rect.top;
-        
-        const oldZoom = engine.zoom;
-        let newZoom = oldZoom + e.deltaY * -0.001;
-        newZoom = Math.max(0.2, Math.min(newZoom, 8));
-        
-        const cw = canvasRef.current.width / 2;
-        const ch = canvasRef.current.height / 2;
-        
-        const panX = engine.panX || 0;
-        const panY = engine.panY || 0;
-        
-        engine.panX = screenX - cw - (screenX - cw - panX) * (newZoom / oldZoom);
-        engine.panY = screenY - ch - (screenY - ch - panY) * (newZoom / oldZoom);
-        engine.zoom = newZoom;
+        engine.zoom += e.deltaY * -0.001;
+        engine.zoom = Math.max(0.2, Math.min(engine.zoom, 8));
     };
 
     const getPinnedCenter = (item) => {
@@ -2292,7 +2276,6 @@ export default function AnimatorApp() {
             };
 
             const drawPsdLayer = (layer, isActive = false) => {
-                if (layer.visible === false) return;
                 const source = (!isActive && !layer.isStatic && layer.previewSrc) ? layer.previewSrc : layer.imageSrc;
                 const img = layerImageCache.current[source];
                 if (!img || !layer.imageRect) return;
@@ -2335,9 +2318,7 @@ export default function AnimatorApp() {
                     const p1 = engine.verticesCurrent[tri[0]]; const p2 = engine.verticesCurrent[tri[1]]; const p3 = engine.verticesCurrent[tri[2]];
                     const t1 = engine.verticesRest[tri[0]]; const t2 = engine.verticesRest[tri[1]]; const t3 = engine.verticesRest[tri[2]];
 
-                    if (!showWeights && !showDepthMask && !showDepthView) {
-                        if (activeLayer?.visible !== false) drawTexturedTriangle(ctx, engine.image, engine.imageRect, p1, p2, p3, t1, t2, t3);
-                    }
+                    if (!showWeights && !showDepthMask && !showDepthView) drawTexturedTriangle(ctx, engine.image, engine.imageRect, p1, p2, p3, t1, t2, t3);
                     
                     if (wireframe || showWeights || showDepthMask || showDepthView) {
                         ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.lineTo(p3.x, p3.y); ctx.closePath();
@@ -2925,23 +2906,11 @@ export default function AnimatorApp() {
                     <label className="block text-sm font-medium">Import</label>
                     <div className="space-y-3">
                         <div className="flex gap-2">
-                            <label className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded text-[10px] font-bold text-slate-200 text-center cursor-pointer block transition-all shadow-inner">
-                                🖼️ TEXTURE
-                                <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
-                            </label>
-                            <label className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded text-[10px] font-bold text-slate-200 text-center cursor-pointer block transition-all shadow-inner">
-                                🗺️ DEPTHMAP
-                                <input type="file" accept="image/*" onChange={handleDepthUpload} className="hidden" />
-                            </label>
+                            <input type="file" accept="image/*" onChange={handleImageUpload} title="Texture" className="block w-1/2 text-[9px] text-slate-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-blue-600 file:text-white cursor-pointer" />
+                            <input type="file" accept="image/*" onChange={handleDepthUpload} title="Depth Map" className="block w-1/2 text-[9px] text-slate-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-purple-600 file:text-white cursor-pointer" />
                         </div>
-                        <label className="w-full py-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded text-[10px] font-bold text-slate-200 text-center cursor-pointer block transition-all shadow-inner">
-                            🔵 IMPORT PSD LAYERS
-                            <input type="file" accept=".psd,image/vnd.adobe.photoshop" onChange={handlePsdUpload} className="hidden" />
-                        </label>
-                        <label className="w-full py-2 bg-slate-600 hover:bg-slate-500 rounded text-[10px] font-bold text-white shadow text-center cursor-pointer block transition-all">
-                            📥 IMPORT JSON PROJECT
-                            <input type="file" accept=".json" onChange={importEverything} className="hidden" />
-                        </label>
+                        <input type="file" accept=".psd,image/vnd.adobe.photoshop" onChange={handlePsdUpload} title="PSD" className="block w-full text-[9px] text-slate-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-emerald-700 file:text-white cursor-pointer" />
+                        <label className="w-full py-1.5 bg-slate-600 hover:bg-slate-500 rounded text-[10px] font-bold text-white shadow text-center cursor-pointer block">IMPORT JSON<input type="file" accept=".json" onChange={importEverything} className="hidden" /></label>
                         {layers.length > 0 && (
                             <div className="space-y-2">
                                 <div>
@@ -2975,18 +2944,6 @@ export default function AnimatorApp() {
                                             className="px-2 py-1 rounded bg-slate-900 text-slate-400 hover:text-white cursor-grab"
                                             title="Drag layer"
                                         >≡</button>
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                layersRef.current = layersRef.current.map(item => item.id === layer.id ? { ...item, visible: item.visible === false ? true : false } : item);
-                                                setLayers(layersRef.current);
-                                                setForceRender(Date.now());
-                                            }}
-                                            className={`px-2 py-1 rounded text-[10px] transition-all ${layer.visible !== false ? 'bg-slate-900 text-cyan-400' : 'bg-slate-900/40 text-slate-600 opacity-40'}`}
-                                            title={layer.visible !== false ? "Ocultar camada" : "Mostrar camada"}
-                                        >
-                                            👁️
-                                        </button>
                                         <button onClick={() => applyLayer(layer.id)} className="min-w-0 flex-1 text-left flex items-center gap-2">
                                             <img src={layer.imageSrc} className="w-9 h-9 object-contain bg-black/30 rounded" />
                                             <span className="min-w-0 flex-1"><span className="block text-[9px] font-bold text-slate-200 truncate">{layer.name}</span><span className={`inline-block mt-1 rounded px-1.5 py-0.5 text-[8px] font-bold ${layer.depthSrc ? 'bg-fuchsia-500/25 text-fuchsia-200 border border-fuchsia-400/50' : 'text-slate-500'}`}>{layer.depthSrc ? 'DEPTH LINKED' : 'no depth'}</span></span>
@@ -3013,10 +2970,10 @@ export default function AnimatorApp() {
                 </div>
 
                 <div className="bg-slate-700 p-4 rounded-lg space-y-3">
-                    <div className="flex border-b border-slate-600/40 mb-2">
-                        <button onClick={() => setLeftPanelTab('MESH')} className={`flex-1 py-2 text-[9px] font-bold transition-all border-b-2 -mb-px text-center ${leftPanelTab === 'MESH' ? 'border-indigo-500 text-indigo-400 bg-slate-800/40' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/10'}`}>MESH</button>
-                        <button onClick={() => setLeftPanelTab('3D')} className={`flex-1 py-2 text-[9px] font-bold transition-all border-b-2 -mb-px text-center ${leftPanelTab === '3D' ? 'border-fuchsia-500 text-fuchsia-400 bg-slate-800/40' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/10'}`}>3D</button>
-                        <button onClick={() => setLeftPanelTab('PHYSICS')} className={`flex-1 py-2 text-[9px] font-bold transition-all border-b-2 -mb-px text-center ${leftPanelTab === 'PHYSICS' ? 'border-sky-500 text-sky-400 bg-slate-800/40' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/10'}`}>Physics</button>
+                    <div className="grid grid-cols-3 gap-1 bg-slate-800 p-1 rounded">
+                        <button onClick={() => setLeftPanelTab('MESH')} className={`py-1.5 text-[9px] font-bold rounded ${leftPanelTab === 'MESH' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-slate-700'}`}>MESH</button>
+                        <button onClick={() => setLeftPanelTab('3D')} className={`py-1.5 text-[9px] font-bold rounded ${leftPanelTab === '3D' ? 'bg-fuchsia-600 text-white' : 'text-slate-400 hover:bg-slate-700'}`}>3D</button>
+                        <button onClick={() => setLeftPanelTab('PHYSICS')} className={`py-1.5 text-[9px] font-bold rounded ${leftPanelTab === 'PHYSICS' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:bg-slate-700'}`}>Physics</button>
                     </div>
                     {leftPanelTab === 'MESH' && (<><label className="block text-sm font-medium">2. Morphological Mesh</label><div className="flex gap-1 mb-2"><button onClick={() => { setMeshType('OPTIMIZED'); if(uiMode === 'EDIT') applyRemesh('OPTIMIZED', gridSize); }} className={`flex-1 py-1.5 text-[9px] font-bold rounded ${meshType === 'OPTIMIZED' ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-400'}`}>Edge Optimized</button><button onClick={() => { setMeshType('GRID'); if(uiMode === 'EDIT') applyRemesh('GRID', gridSize); }} className={`flex-1 py-1.5 text-[9px] font-bold rounded ${meshType === 'GRID' ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-400'}`}>Full Grid</button></div><div className="flex gap-2"><div className="flex-1"><div className="flex justify-between text-[10px] mb-1"><span>XYZ density:</span><span>{gridSize}</span></div><input type="range" min="4" max="80" value={gridSize} onChange={(e) => { setGridSize(Number(e.target.value)); if(uiMode === 'EDIT') applyRemesh(meshType, Number(e.target.value)); }} disabled={uiMode === 'PREVIEW'} className="w-full accent-indigo-500" /></div><div className="flex-1"><div className="flex justify-between text-[10px] mb-1"><span>Physical margin:</span><span>{borderOffset > 0 ? '+' : ''}{borderOffset}</span></div><input type="range" min="-15" max="15" value={borderOffset} onChange={(e) => { setBorderOffset(Number(e.target.value)); if(uiMode === 'EDIT') applyRemesh(meshType, gridSize); }} disabled={uiMode === 'PREVIEW'} className="w-full accent-emerald-500" /></div></div>{meshType === 'OPTIMIZED' && (<div className="flex gap-2 flex-col"><div className="flex-1"><div className="flex justify-between text-[10px] mb-1"><span>Edge density (multiplier):</span><span>{edgeDensity.toFixed(1)}x</span></div><input type="range" min="0.5" max="4.0" step="0.1" value={edgeDensity} onChange={(e) => { setEdgeDensity(Number(e.target.value)); engine.edgeDensity = Number(e.target.value); if(uiMode === 'EDIT') applyRemesh(meshType, gridSize); }} disabled={uiMode === 'PREVIEW'} className="w-full accent-indigo-400" /></div><div className="flex gap-2"><div className="flex-1"><div className="flex justify-between text-[10px] mb-1"><span className="text-fuchsia-300">Edge depth:</span><span>{edgeDepth.toFixed(2)}</span></div><input type="range" min="0" max="1.0" step="0.05" value={edgeDepth} onChange={(e) => setEdgeDepth(Number(e.target.value))} className="w-full accent-fuchsia-500" /></div><div className="flex-1"><div className="flex justify-between text-[10px] mb-1"><span className="text-fuchsia-300">Edge bevel size:</span><span>{edgeBevel.toFixed(2)}</span></div><input type="range" min="0.01" max="0.2" step="0.01" value={edgeBevel} onChange={(e) => setEdgeBevel(Number(e.target.value))} className="w-full accent-fuchsia-500" /></div></div></div>)}</>)}
                     {leftPanelTab === '3D' && (<><div className="flex gap-3 justify-center py-2 bg-slate-800/50 rounded border border-slate-600"><Pad2D label="Rot 3D (Yaw/Pitch)" engine={engine} propX="yawY" propY="pitchX" onChange={() => { if (uiMode === 'PREVIEW' && autoRecord && keyframes[selectedKeyframe]) saveKeyframe(); }} /><Pad2D label="Depth XY (Parallax)" engine={engine} propX="parallaxX" propY="parallaxY" onChange={() => { if (uiMode === 'PREVIEW' && autoRecord && keyframes[selectedKeyframe]) saveKeyframe(); }} /></div><div className="border-t border-slate-600 pt-2"><label className="flex items-center gap-2 text-[10px] font-semibold text-sky-300 mb-1 cursor-pointer"><input type="checkbox" checked={useMouseRotation} onChange={(e) => setUseMouseRotation(e.target.checked)} className="rounded bg-slate-800 border-sky-500" /> Mouse-driven rotation</label><label className="flex items-center gap-2 text-[10px] font-semibold text-amber-300 mb-2 cursor-pointer"><input type="checkbox" checked={useMouseParallax} onChange={(e) => setUseMouseParallax(e.target.checked)} className="rounded bg-slate-800 border-amber-500" /> Mouse-driven parallax</label><div className="flex gap-2"><div className="flex-1"><label className="text-[9px] text-slate-400 block mb-1">3D rotation strength</label><input type="range" min="0" max="0.5" step="0.01" value={mouseRotationIntensity} onChange={(e) => setMouseRotationIntensity(Number(e.target.value))} className="w-full accent-sky-400" /></div><div className="flex-1"><label className="text-[9px] text-slate-400 block mb-1">Depth strength</label><input type="range" min="0" max="0.5" step="0.01" value={mouseParallaxIntensity} onChange={(e) => setMouseParallaxIntensity(Number(e.target.value))} className="w-full accent-amber-400" /></div></div></div><div className="border-t border-slate-600 pt-2 space-y-2"><label className="flex items-center gap-2 text-[10px] cursor-pointer text-slate-200"><input type="checkbox" checked={invertDepth} onChange={(e) => setInvertDepth(e.target.checked)} className="rounded bg-slate-800" /> Invert depth (convex / concave)</label><div className="flex gap-2"><div className="flex-1"><label className="text-[9px] text-slate-400 block mb-1">Gamma curve (Z)</label><input type="range" min="0.1" max="3" step="0.1" value={depthGamma} onChange={(e) => setDepthGamma(Number(e.target.value))} className="w-full accent-fuchsia-400" /></div><div className="flex-1"><label className="text-[9px] text-slate-400 block mb-1">Depth multiplier</label><input type="range" min="0" max="1" step="0.05" value={depthMultiplier} onChange={(e) => setDepthMultiplier(Number(e.target.value))} className="w-full accent-fuchsia-400" /></div></div><div className="flex gap-2"><div className="flex-1"><label className="text-[9px] text-slate-400 block mb-1">Depth map blur</label><input type="range" min="0" max="20" step="1" value={depthBlur} onChange={(e) => setDepthBlur(Number(e.target.value))} className="w-full accent-fuchsia-400" /></div><div className="flex-1"><label className="text-[9px] text-slate-400 block mb-1">Relief smoothness</label><input type="range" min="0" max="0.5" step="0.01" value={depthMapSmoothness} onChange={(e) => setDepthMapSmoothness(Number(e.target.value))} className="w-full accent-fuchsia-400" /></div></div><div className="flex gap-2"><div className="flex-1"><label className="text-[9px] text-slate-400 block mb-1">Y mask threshold</label><input type="range" min="0" max="1" step="0.01" value={depthGradientY} onChange={(e) => setDepthGradientY(Number(e.target.value))} className="w-full accent-fuchsia-400" /></div><div className="flex-1"><label className="text-[9px] text-slate-400 block mb-1">Mask smoothness</label><input type="range" min="0.01" max="1" step="0.01" value={depthGradientSmoothness} onChange={(e) => setDepthGradientSmoothness(Number(e.target.value))} className="w-full accent-fuchsia-400" /></div></div><div><label className="text-[9px] text-slate-400 block mb-1">Physical deformation affects Z (3D)</label><input type="range" min="0" max="2" step="0.1" value={deformZIntensity} onChange={(e) => setDeformZIntensity(Number(e.target.value))} className="w-full accent-fuchsia-400" /></div></div></>)}
@@ -3267,10 +3224,10 @@ export default function AnimatorApp() {
             <div className="w-[300px] bg-slate-800 p-5 flex flex-col gap-4 shadow-xl z-20 border-l border-slate-700 overflow-y-auto custom-scrollbar">
                 
                 <div className="bg-slate-700 p-3 rounded-lg flex flex-col gap-3">
-                    <div className="flex border-b border-slate-600/40 mb-2">
-                        <button onClick={() => setUtilityPanelTab('IO')} className={`flex-1 py-2 text-[9px] font-bold transition-all border-b-2 -mb-px text-center ${utilityPanelTab === 'IO' ? 'border-emerald-500 text-emerald-400 bg-slate-800/40' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/10'}`}>Export</button>
-                        <button onClick={() => setUtilityPanelTab('DEBUG')} className={`flex-1 py-2 text-[9px] font-bold transition-all border-b-2 -mb-px text-center ${utilityPanelTab === 'DEBUG' ? 'border-amber-500 text-amber-400 bg-slate-800/40' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/10'}`}>Debug</button>
-                        <button onClick={() => setUtilityPanelTab('LISSAJOUS')} className={`flex-1 py-2 text-[9px] font-bold transition-all border-b-2 -mb-px text-center ${utilityPanelTab === 'LISSAJOUS' ? 'border-fuchsia-500 text-fuchsia-400 bg-slate-800/40' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/10'}`}>Lissajous</button>
+                    <div className="grid grid-cols-3 gap-1 bg-slate-800 p-1 rounded">
+                        <button onClick={() => setUtilityPanelTab('IO')} className={`py-1.5 text-[9px] font-bold rounded ${utilityPanelTab === 'IO' ? 'bg-emerald-700 text-white' : 'text-slate-400 hover:bg-slate-700'}`}>Export</button>
+                        <button onClick={() => setUtilityPanelTab('DEBUG')} className={`py-1.5 text-[9px] font-bold rounded ${utilityPanelTab === 'DEBUG' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:bg-slate-700'}`}>Debug</button>
+                        <button onClick={() => setUtilityPanelTab('LISSAJOUS')} className={`py-1.5 text-[9px] font-bold rounded ${utilityPanelTab === 'LISSAJOUS' ? 'bg-fuchsia-600 text-white' : 'text-slate-400 hover:bg-slate-700'}`}>Lissajous</button>
                     </div>
 
                     {utilityPanelTab === 'IO' && (

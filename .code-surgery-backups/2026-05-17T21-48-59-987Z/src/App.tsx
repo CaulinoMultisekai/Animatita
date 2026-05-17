@@ -609,24 +609,8 @@ export default function AnimatorApp() {
     };
 
     const handleWheel = (e) => {
-        if (!canvasRef.current) return;
-        const rect = canvasRef.current.getBoundingClientRect();
-        const screenX = e.clientX - rect.left;
-        const screenY = e.clientY - rect.top;
-        
-        const oldZoom = engine.zoom;
-        let newZoom = oldZoom + e.deltaY * -0.001;
-        newZoom = Math.max(0.2, Math.min(newZoom, 8));
-        
-        const cw = canvasRef.current.width / 2;
-        const ch = canvasRef.current.height / 2;
-        
-        const panX = engine.panX || 0;
-        const panY = engine.panY || 0;
-        
-        engine.panX = screenX - cw - (screenX - cw - panX) * (newZoom / oldZoom);
-        engine.panY = screenY - ch - (screenY - ch - panY) * (newZoom / oldZoom);
-        engine.zoom = newZoom;
+        engine.zoom += e.deltaY * -0.001;
+        engine.zoom = Math.max(0.2, Math.min(engine.zoom, 8));
     };
 
     const getPinnedCenter = (item) => {
@@ -2292,7 +2276,6 @@ export default function AnimatorApp() {
             };
 
             const drawPsdLayer = (layer, isActive = false) => {
-                if (layer.visible === false) return;
                 const source = (!isActive && !layer.isStatic && layer.previewSrc) ? layer.previewSrc : layer.imageSrc;
                 const img = layerImageCache.current[source];
                 if (!img || !layer.imageRect) return;
@@ -2335,9 +2318,7 @@ export default function AnimatorApp() {
                     const p1 = engine.verticesCurrent[tri[0]]; const p2 = engine.verticesCurrent[tri[1]]; const p3 = engine.verticesCurrent[tri[2]];
                     const t1 = engine.verticesRest[tri[0]]; const t2 = engine.verticesRest[tri[1]]; const t3 = engine.verticesRest[tri[2]];
 
-                    if (!showWeights && !showDepthMask && !showDepthView) {
-                        if (activeLayer?.visible !== false) drawTexturedTriangle(ctx, engine.image, engine.imageRect, p1, p2, p3, t1, t2, t3);
-                    }
+                    if (!showWeights && !showDepthMask && !showDepthView) drawTexturedTriangle(ctx, engine.image, engine.imageRect, p1, p2, p3, t1, t2, t3);
                     
                     if (wireframe || showWeights || showDepthMask || showDepthView) {
                         ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.lineTo(p3.x, p3.y); ctx.closePath();
@@ -2975,18 +2956,6 @@ export default function AnimatorApp() {
                                             className="px-2 py-1 rounded bg-slate-900 text-slate-400 hover:text-white cursor-grab"
                                             title="Drag layer"
                                         >≡</button>
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                layersRef.current = layersRef.current.map(item => item.id === layer.id ? { ...item, visible: item.visible === false ? true : false } : item);
-                                                setLayers(layersRef.current);
-                                                setForceRender(Date.now());
-                                            }}
-                                            className={`px-2 py-1 rounded text-[10px] transition-all ${layer.visible !== false ? 'bg-slate-900 text-cyan-400' : 'bg-slate-900/40 text-slate-600 opacity-40'}`}
-                                            title={layer.visible !== false ? "Ocultar camada" : "Mostrar camada"}
-                                        >
-                                            👁️
-                                        </button>
                                         <button onClick={() => applyLayer(layer.id)} className="min-w-0 flex-1 text-left flex items-center gap-2">
                                             <img src={layer.imageSrc} className="w-9 h-9 object-contain bg-black/30 rounded" />
                                             <span className="min-w-0 flex-1"><span className="block text-[9px] font-bold text-slate-200 truncate">{layer.name}</span><span className={`inline-block mt-1 rounded px-1.5 py-0.5 text-[8px] font-bold ${layer.depthSrc ? 'bg-fuchsia-500/25 text-fuchsia-200 border border-fuchsia-400/50' : 'text-slate-500'}`}>{layer.depthSrc ? 'DEPTH LINKED' : 'no depth'}</span></span>
