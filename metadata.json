@@ -1,0 +1,6 @@
+{
+  "name": "Minimal React App",
+  "description": "A minimal React + Vite application displaying Hello World with basic hooks imports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
