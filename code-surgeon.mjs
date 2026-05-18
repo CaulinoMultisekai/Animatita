@@ -599,7 +599,7 @@ function applyPlan(plan, options) {
     const root = path.resolve(options.root);
     const dryRun = options.dryRun || !options.apply || plan.dry_run === true;
     const shouldBackup = options.backup && plan.backup !== false;
-    const stopOnError = plan.stop_on_error !== false;
+    const stopOnError = plan.stop_on_error === true;
 
     const report = {
         ok: true,
@@ -686,7 +686,9 @@ function applyPlan(plan, options) {
                 file,
                 requested_file: edit.file,
                 operation: edit.operation,
-                error: error.message
+                error: error.message,
+                index: i + 1,
+                target_file: target ? toProjectRelativePath(root, target) : null
             });
 
             if (stopOnError) {
@@ -896,10 +898,15 @@ function startWebServer(args) {
                             throw new Error("Backup file does not exist.");
                         }
 
+                        ensureParent(targetPath);
                         fs.copyFileSync(backupPath, targetPath);
 
                         res.writeHead(200, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: true }));
+                        res.end(JSON.stringify({
+                            ok: true,
+                            target_file: toProjectRelativePath(args.root, targetPath),
+                            backup_path: toProjectRelativePath(args.root, backupPath)
+                        }));
                     } catch (err) {
                         res.writeHead(400, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ error: err.message }));
@@ -1350,17 +1357,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             gap: 10px;
         }
 
-        .action-btn-dry {
-            background: transparent;
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-        }
-
-        .action-btn-dry:hover {
-            background: var(--bg-card);
-            border-color: var(--text-secondary);
-        }
-
         .action-btn-apply {
             background: linear-gradient(135deg, #a855f7, #6366f1);
             color: white;
@@ -1705,9 +1701,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
             <!-- SECTOR 3: Control Buttons -->
             <div class="control-actions">
-                <button class="action-btn action-btn-dry" onclick="runSurgery(false)">
-                    🔍 Simulate Surgery (Dry Run)
-                </button>
                 <button class="action-btn action-btn-apply" onclick="runSurgery(true)">
                     ⚡ Execute on Workspace
                 </button>
@@ -1866,10 +1859,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
         function updateButtonStates(isValid) {
             const sendBtn = document.querySelector('.section-card button[onclick="updateIntentionPreview()"]');
-            const dryBtn = document.querySelector('.action-btn-dry');
             const applyBtn = document.querySelector('.action-btn-apply');
 
-            const buttons = [sendBtn, dryBtn, applyBtn];
+            const buttons = [sendBtn, applyBtn];
             buttons.forEach(btn => {
                 if (btn) btn.disabled = !isValid;
             });
@@ -1885,7 +1877,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             });
         }
 
-        function updateIntentionPreview() {
+        async function updateIntentionPreview() {
             const listContainer = document.getElementById('intention-preview-list');
             try {
                 const plan = parsePlanText();
@@ -1927,6 +1919,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
                 listContainer.innerHTML = html;
                 showToast("Intention analysis completed!", "success");
+                await runSurgery(false);
             } catch (e) {
                 listContainer.innerHTML = '<div style="color: var(--error); font-size: 0.85rem; padding: 10px; border: 1px solid rgba(239, 68, 68, 0.2); border-radius:var(--radius-sm);">Fix JSON to preview planned actions.</div>';
                 showToast("Analysis failed: " + e.message, "error");
@@ -1938,7 +1931,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             let plan;
 
             try {
-                plan = JSON.parse(extractJsonFromFencedBlockClient(planText));
+                plan = smartParseJSON(planText);
             } catch (err) {
                 showToast("Invalid Surgery Plan JSON!", "error");
                 return;
@@ -2009,7 +2002,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                         failedFilesMap[normalized] = {
                             id: f.id,
                             operation: f.operation,
-                            error: f.error || "Unknown error"
+                            error: f.error || "Unknown error",
+                            index: f.index,
+                            targetFile: f.target_file
                         };
                     });
                 }
@@ -2045,7 +2040,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 if (report.ok) {
                     showToast(isRealExecution ? "Surgery executed SUCCESSFULLY!" : "Simulation completed!");
                 } else {
-                    showToast("Surgery completed with errors. Check the failed files.", "error");
+                    showToast(formatFailureToast(report), "error");
                 }
 
             } catch (err) {
@@ -2084,6 +2079,15 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             }).join('');
 
             if (activeModifiedFile) selectModifiedFile(activeModifiedFile);
+        }
+
+        function formatFailureToast(report) {
+            const failed = Array.isArray(report.failed) ? report.failed : [];
+            if (failed.length === 0) return "Surgery completed with errors.";
+            const first = failed[0];
+            const file = first.file || first.requested_file || "unknown file";
+            const suffix = failed.length > 1 ? \` (+\${failed.length - 1} more)\` : "";
+            return \`Surgery failed in \${failed.length} edit\${failed.length === 1 ? "" : "s"}: \${file} - \${first.error || "Unknown error"}\${suffix}\`;
         }
 
         function clearDiffWindow() {
@@ -2166,7 +2170,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             }
 
             container.style.display = 'block';
-            container.innerHTML = filesWithBackups.map(file => {
+            const buttonsHtml = filesWithBackups.map(file => {
                 const backupPath = lastReportBackups[file];
                 return \`
                     <button class="btn-revert" onclick="revertWorkspaceFile('\${file}', '\${backupPath}')">
@@ -2174,11 +2178,34 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                     </button>
                 \`;
             }).join('');
+            const restoreAllHtml = filesWithBackups.length > 1
+                ? \`<button class="btn-revert" style="border-color: rgba(239, 68, 68, 0.55); color: #fecaca;" onclick="revertAllWorkspaceFiles()">Restore All Backups (\${filesWithBackups.length})</button>\`
+                : "";
+            container.innerHTML = restoreAllHtml + buttonsHtml;
         }
 
-        async function revertWorkspaceFile(targetFile, backupPath) {
+        async function revertAllWorkspaceFiles() {
+            const entries = Object.entries(lastReportBackups);
+            if (entries.length === 0) return;
+
+            let restored = 0;
+            const errors = [];
+            for (const [file, backupPath] of entries) {
+                const ok = await revertWorkspaceFile(file, backupPath, { quiet: true });
+                if (ok) restored++;
+                else errors.push(file);
+            }
+
+            if (errors.length === 0) {
+                showToast(\`All backups restored (\${restored} file\${restored === 1 ? "" : "s"}).\`, "success");
+            } else {
+                showToast(\`Restored \${restored}; failed to restore: \${errors.join(", ")}\`, "error");
+            }
+        }
+
+        async function revertWorkspaceFile(targetFile, backupPath, options = {}) {
             try {
-                showToast(\`Restaurando backup de \${targetFile}...\`);
+                if (!options.quiet) showToast(\`Restaurando backup de \${targetFile}...\`);
                 const res = await fetch('/api/revert', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2187,7 +2214,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
                 const data = await res.json();
                 if (data.ok) {
-                    showToast("Surgery reverted SUCCESSFULLY!", "success");
+                    if (!options.quiet) showToast(\`Backup restored: \${data.target_file || targetFile}\`, "success");
                     
                     try {
                         const fileRes = await fetch(\`/api/read?file=\${encodeURIComponent(targetFile)}\`);
@@ -2199,11 +2226,14 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
                     delete lastReportBackups[targetFile];
                     renderRevertSafetyActions(true);
+                    return true;
                 } else {
-                    showToast("Error reverting backup: " + data.error, "error");
+                    if (!options.quiet) showToast("Error reverting backup: " + data.error, "error");
+                    return false;
                 }
             } catch (err) {
-                showToast("Network error during revert: " + err.message, "error");
+                if (!options.quiet) showToast("Network error during revert: " + err.message, "error");
+                return false;
             }
         }
 
