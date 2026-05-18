@@ -6,10 +6,10 @@
  * Optimized with a clean, unified left-to-right web interface workflow!
  *
  * Usage:
- *   node code-surgeon.mjs --plan surgery.json --root .
- *   node code-surgeon.mjs --plan surgery.json --root . --apply
- *   cat surgery.json | node code-surgeon.mjs --root . --apply
- *   node code-surgeon.mjs --web [--port 3333]
+ * node code-surgeon.mjs --plan surgery.json --root .
+ * node code-surgeon.mjs --plan surgery.json --root . --apply
+ * cat surgery.json | node code-surgeon.mjs --root . --apply
+ * node code-surgeon.mjs --web [--port 3333]
  *
  * Default mode is dry-run. Nothing is written unless --apply is passed.
  */
@@ -21,7 +21,7 @@ import http from "node:http";
 import url from "node:url";
 import { spawnSync, spawn } from "node:child_process";
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.2";
 
 function help() {
     console.log(`
@@ -100,10 +100,6 @@ function readStdin() {
         process.stdin.on("end", () => resolve(data));
         process.stdin.on("error", reject);
     });
-}
-
-function normalizeNewlines(value) {
-    return String(value ?? "").replace(/\r\n/g, "\n");
 }
 
 function hash(value) {
@@ -243,36 +239,125 @@ function ensureParent(filePath) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
-function findAll(content, anchor) {
-    anchor = normalizeNewlines(anchor);
+function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
+function findAll(content, anchor) {
+    anchor = String(anchor || "");
     if (!anchor) {
         throw new Error("find anchor cannot be empty.");
     }
 
-    const positions = [];
-    let index = 0;
+    // Adapt the anchor search to tolerate both \n and \r\n without mutating file content
+    const escapedAnchor = escapeRegExp(anchor.replace(/\r\n/g, "\n"));
+    const regexSource = escapedAnchor.replace(/\n/g, '\\r?\\n');
+    const regex = new RegExp(regexSource, 'g');
 
-    while (true) {
-        const found = content.indexOf(anchor, index);
-        if (found === -1) break;
-        positions.push(found);
-        index = found + anchor.length;
+    const positions = [];
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+        positions.push({ index: match.index, length: match[0].length });
+        if (match[0].length === 0) regex.lastIndex++; // Prevent infinite loops
     }
 
     return positions;
+}
+
+/**
+ * Returns diagnostic hints when a find anchor fails to match.
+ */
+function diagnoseFailedFind(content, anchor) {
+    const hints = [];
+
+    // Normalize newlines in both for comparison
+    const contentNorm = content.replace(/\r\n/g, "\n");
+    const anchorNorm = String(anchor || "").replace(/\r\n/g, "\n");
+
+    const normalizeWS = s => s.replace(/[ \t]+/g, " ").replace(/^[ \t]+/gm, "").trim();
+    if (normalizeWS(contentNorm).includes(normalizeWS(anchorNorm))) {
+        hints.push(
+            "A whitespace-normalized version of this anchor WAS found in the file. " +
+            "The find string likely has wrong indentation or mixed tabs/spaces. " +
+            "Copy the anchor verbatim from the file content, preserving exact leading whitespace."
+        );
+    }
+
+    const anchorLines = anchorNorm.split("\n").map(l => l.trim()).filter(Boolean);
+    if (anchorLines.length > 0) {
+        const firstLine = anchorLines[0];
+        const contentLines = contentNorm.split("\n");
+        const lineMatches = contentLines
+            .map((l, i) => (l.includes(firstLine) ? i + 1 : null))
+            .filter(Boolean);
+
+        if (lineMatches.length > 0) {
+            hints.push(
+                `The first line of the anchor (${JSON.stringify(firstLine.slice(0, 70))}) ` +
+                `was found at line(s): ${lineMatches.slice(0, 5).join(", ")}. ` +
+                `The mismatch is likely in the lines that follow — check indentation and exact content.`
+            );
+        } else {
+            hints.push(
+                `The first line of the anchor (${JSON.stringify(firstLine.slice(0, 70))}) ` +
+                `was NOT found anywhere in the file. ` +
+                `The anchor may reference code that was already modified, renamed, or never existed.`
+            );
+        }
+    }
+
+    if (anchorLines.length > 1) {
+        const lastLine = anchorLines[anchorLines.length - 1];
+        const contentLines = contentNorm.split("\n");
+        const lastLineMatches = contentLines
+            .map((l, i) => (l.includes(lastLine) ? i + 1 : null))
+            .filter(Boolean);
+
+        if (lastLineMatches.length > 0) {
+            hints.push(
+                `The last line of the anchor (${JSON.stringify(lastLine.slice(0, 70))}) ` +
+                `exists at line(s): ${lastLineMatches.slice(0, 5).join(", ")}. ` +
+                `Consider using a shorter, single-line anchor instead.`
+            );
+        }
+    }
+
+    const lineCount = anchorNorm.split("\n").length;
+    if (lineCount > 4) {
+        hints.push(
+            `Anchor spans ${lineCount} lines — long anchors are fragile. ` +
+            `Prefer the shortest unique substring (ideally 1–2 lines) or use line_start/line_end instead.`
+        );
+    }
+
+    return hints;
 }
 
 function selectMatches(content, anchor, occurrence = "unique") {
     const matches = findAll(content, anchor);
 
     if (matches.length === 0) {
-        throw new Error("find anchor was not found.");
+        const preview = anchor.length > 100 ? anchor.slice(0, 100) + "…" : anchor;
+        const hints = diagnoseFailedFind(content, anchor);
+        const hintsText = hints.length > 0
+            ? "\n  Hints:\n" + hints.map(h => "    • " + h).join("\n")
+            : "";
+        throw new Error(
+            `find anchor not found in file.\n  Anchor preview: ${JSON.stringify(preview)}${hintsText}`
+        );
     }
 
     if (occurrence === "unique" || occurrence === null || occurrence === undefined) {
         if (matches.length !== 1) {
-            throw new Error(`Expected unique match, found ${matches.length}.`);
+            const preview = anchor.length > 80 ? anchor.slice(0, 80) + "…" : anchor;
+            const lineNumbers = matches.map(m => content.slice(0, m.index).split("\n").length);
+            throw new Error(
+                `Expected unique match but found ${matches.length} occurrences.\n` +
+                `  Anchor preview: ${JSON.stringify(preview)}\n` +
+                `  Found at line(s): ${lineNumbers.join(", ")}\n` +
+                `  Fix: Use "occurrence": 1, 2, … to target a specific instance, ` +
+                `expand the anchor to include more surrounding context, or use "occurrence": "all".`
+            );
         }
         return matches;
     }
@@ -286,7 +371,10 @@ function selectMatches(content, anchor, occurrence = "unique") {
         return [matches[num - 1]];
     }
 
-    throw new Error(`Invalid occurrence value: ${occurrence}`);
+    throw new Error(
+        `Invalid occurrence value: ${JSON.stringify(occurrence)}. ` +
+        `Use "unique", "all", or a positive integer (1–${matches.length}).`
+    );
 }
 
 function getLineOffsets(content, lineStart, lineEnd) {
@@ -319,55 +407,55 @@ function getLineOffsets(content, lineStart, lineEnd) {
 }
 
 function replaceMatches(content, anchor, replacement, occurrence) {
-    anchor = normalizeNewlines(anchor);
-    replacement = normalizeNewlines(replacement);
+    const predominantLineEnding = (content.match(/\r\n/g) || []).length > (content.match(/\n/g) || []).length / 2 ? "\r\n" : "\n";
+    const replacementAdapted = String(replacement || "").replace(/\r\n/g, "\n").replace(/\n/g, predominantLineEnding);
 
-    const positions = selectMatches(content, anchor, occurrence);
+    const matches = selectMatches(content, anchor, occurrence);
     let output = content;
 
-    for (const pos of [...positions].reverse()) {
-        output = output.slice(0, pos) + replacement + output.slice(pos + anchor.length);
+    for (const match of [...matches].reverse()) {
+        output = output.slice(0, match.index) + replacementAdapted + output.slice(match.index + match.length);
     }
 
     return output;
 }
 
 function insertMatches(content, anchor, insertion, occurrence, mode) {
-    anchor = normalizeNewlines(anchor);
-    insertion = normalizeNewlines(insertion);
+    const predominantLineEnding = (content.match(/\r\n/g) || []).length > (content.match(/\n/g) || []).length / 2 ? "\r\n" : "\n";
+    const insertionAdapted = String(insertion || "").replace(/\r\n/g, "\n").replace(/\n/g, predominantLineEnding);
 
-    const positions = selectMatches(content, anchor, occurrence);
+    const matches = selectMatches(content, anchor, occurrence);
     let output = content;
 
-    for (const pos of [...positions].reverse()) {
-        const insertAt = mode === "before" ? pos : pos + anchor.length;
-        output = output.slice(0, insertAt) + insertion + output.slice(insertAt);
+    for (const match of [...matches].reverse()) {
+        const insertAt = mode === "before" ? match.index : match.index + match.length;
+        output = output.slice(0, insertAt) + insertionAdapted + output.slice(insertAt);
     }
 
     return output;
 }
 
 function deleteMatches(content, anchor, occurrence) {
-    anchor = normalizeNewlines(anchor);
-
-    const positions = selectMatches(content, anchor, occurrence);
+    const matches = selectMatches(content, anchor, occurrence);
     let output = content;
 
-    for (const pos of [...positions].reverse()) {
-        output = output.slice(0, pos) + output.slice(pos + anchor.length);
+    for (const match of [...matches].reverse()) {
+        output = output.slice(0, match.index) + output.slice(match.index + match.length);
     }
 
     return output;
 }
 
 function ensureImport(content, edit) {
-    const statement = normalizeNewlines(edit.import_statement ?? edit.content);
+    const predominantLineEnding = (content.match(/\r\n/g) || []).length > (content.match(/\n/g) || []).length / 2 ? "\r\n" : "\n";
+    let statement = edit.import_statement ?? edit.content;
+    statement = String(statement || "").replace(/\r\n/g, "\n").replace(/\n/g, predominantLineEnding);
 
     if (!statement.trim()) {
         throw new Error("ensure_import requires import_statement or content.");
     }
 
-    if (content.includes(statement)) {
+    if (content.replace(/\r\n/g, "\n").includes(String(edit.import_statement ?? edit.content).replace(/\r\n/g, "\n"))) {
         return content;
     }
 
@@ -389,14 +477,18 @@ function ensureImport(content, edit) {
     }
 
     if (lastImportLine >= 0) {
-        lines.splice(lastImportLine + 1, 0, statement);
+        const needsCR = lines[lastImportLine].endsWith("\r");
+        const statementToInsert = needsCR && !statement.endsWith("\r") ? statement + "\r" : statement;
+        lines.splice(lastImportLine + 1, 0, statementToInsert);
         return lines.join("\n");
     }
 
-    return statement + "\n" + content;
+    return statement + predominantLineEnding + content;
 }
 
 function applyEdit(content, edit) {
+    const predominantLineEnding = (content.match(/\r\n/g) || []).length > (content.match(/\n/g) || []).length / 2 ? "\r\n" : "\n";
+
     switch (edit.operation) {
         case "replace": {
             if (typeof edit.find === "string") {
@@ -404,7 +496,8 @@ function applyEdit(content, edit) {
             }
 
             const range = getLineOffsets(content, edit.line_start, edit.line_end);
-            return content.slice(0, range.start) + normalizeNewlines(edit.replace_with) + content.slice(range.end);
+            const replacement = String(edit.replace_with ?? "").replace(/\r\n/g, "\n").replace(/\n/g, predominantLineEnding);
+            return content.slice(0, range.start) + replacement + content.slice(range.end);
         }
 
         case "insert_before":
@@ -422,11 +515,15 @@ function applyEdit(content, edit) {
             return content.slice(0, range.start) + content.slice(range.end);
         }
 
-        case "append":
-            return content + normalizeNewlines(edit.content ?? edit.insert);
+        case "append": {
+            const insertion = String(edit.content ?? edit.insert ?? "").replace(/\r\n/g, "\n").replace(/\n/g, predominantLineEnding);
+            return content + insertion;
+        }
 
-        case "prepend":
-            return normalizeNewlines(edit.content ?? edit.insert) + content;
+        case "prepend": {
+            const insertion = String(edit.content ?? edit.insert ?? "").replace(/\r\n/g, "\n").replace(/\n/g, predominantLineEnding);
+            return insertion + content;
+        }
 
         case "ensure_import":
             return ensureImport(content, edit);
@@ -525,7 +622,10 @@ function applyPlan(plan, options) {
             target = resolveInsideRoot(root, file);
 
             const actualFile = toProjectRelativePath(root, target);
-            let before = fs.existsSync(target) ? normalizeNewlines(fs.readFileSync(target, "utf8")) : null;
+            const rawContent = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : null;
+
+            // Core Fix: Do NOT forcefully strip \r\n from file strings
+            let before = rawContent !== null ? rawContent : null;
             let after;
 
             if (edit.operation === "create_file") {
@@ -533,7 +633,7 @@ function applyPlan(plan, options) {
                     throw new Error("File already exists. Set overwrite=true to replace it.");
                 }
 
-                after = normalizeNewlines(edit.content);
+                after = String(edit.content ?? "");
             } else {
                 if (before === null) {
                     throw new Error(`Target file does not exist. Normalized path: ${file}`);
@@ -557,15 +657,16 @@ function applyPlan(plan, options) {
                 continue;
             }
 
+            const writeContent = after;
             let backup_path = null;
 
             if (!dryRun) {
-                if (shouldBackup && before !== null) {
-                    backup_path = backupFile(root, actualFile, before);
+                if (shouldBackup && rawContent !== null) {
+                    backup_path = backupFile(root, actualFile, rawContent);
                 }
 
                 ensureParent(target);
-                fs.writeFileSync(target, after, "utf8");
+                fs.writeFileSync(target, writeContent, "utf8");
             }
 
             report.changed.push({
@@ -633,6 +734,71 @@ function startWebServer(args) {
         return (res.stdout || res.stderr || "").trim();
     }
 
+    function generateAndApplyPatch(filePath, beforeContent, afterContent, rootDir) {
+        const randId = Math.random().toString(36).substring(2, 7);
+        const tempBefore = path.join(rootDir, `.cs_temp_before_${Date.now()}_${randId}`);
+        const tempAfter = path.join(rootDir, `.cs_temp_after_${Date.now()}_${randId}`);
+        const patchFile = path.join(rootDir, `.cs_temp_patch_${Date.now()}_${randId}`);
+
+        try {
+            fs.writeFileSync(tempBefore, beforeContent || "", "utf8");
+            fs.writeFileSync(tempAfter, afterContent || "", "utf8");
+
+            // Run git diff --no-index. It exits with 1 if there are differences.
+            const res = spawnSync("git", ["diff", "--no-index", "--patch", "--no-color", tempBefore, tempAfter], {
+                cwd: rootDir,
+                encoding: "utf8"
+            });
+
+            const stdout = res.stdout || "";
+            if (res.status > 1 || (!stdout && res.error)) {
+                throw new Error(res.stderr || res.error?.message || `Failed to generate diff for ${filePath}`);
+            }
+
+            if (!stdout.trim()) {
+                // No differences, nothing to stage
+                return;
+            }
+
+            // Rewrite patch headers
+            const beforeBase = path.basename(tempBefore);
+            const afterBase = path.basename(tempAfter);
+
+            // Ensure standard relative path format for Git (forward slashes)
+            const relPath = filePath.replace(/\\/g, "/");
+
+            // Mantém o \r intacto preservando o formato original do diff gerado pelo Git
+            const lines = stdout.split('\n');
+            const rewrittenLines = lines.map(line => {
+                if (line.startsWith("--- ") && line.includes(beforeBase)) {
+                    return line.endsWith("\r") ? `--- a/${relPath}\r` : `--- a/${relPath}`;
+                }
+                if (line.startsWith("+++ ") && line.includes(afterBase)) {
+                    return line.endsWith("\r") ? `+++ b/${relPath}\r` : `+++ b/${relPath}`;
+                }
+                return line;
+            });
+
+            const cleanPatch = rewrittenLines.join("\n");
+            fs.writeFileSync(patchFile, cleanPatch, "utf8");
+
+            // Apply the patch to the staging area
+            const applyRes = spawnSync("git", ["apply", "--cached", patchFile], {
+                cwd: rootDir,
+                encoding: "utf8"
+            });
+
+            if (applyRes.status !== 0) {
+                throw new Error(applyRes.stderr || `Failed to stage patch for ${filePath}`);
+            }
+        } finally {
+            // Always clean up temp files
+            if (fs.existsSync(tempBefore)) fs.unlinkSync(tempBefore);
+            if (fs.existsSync(tempAfter)) fs.unlinkSync(tempAfter);
+            if (fs.existsSync(patchFile)) fs.unlinkSync(patchFile);
+        }
+    }
+
     const server = http.createServer(async (req, res) => {
         const reqUrl = new URL(req.url, `http://${req.headers.host}`);
         const pathname = reqUrl.pathname;
@@ -676,9 +842,7 @@ function startWebServer(args) {
                 req.on("end", () => {
                     try {
                         const plan = JSON.parse(extractJsonFromFencedBlock(body));
-                        
-                        // We also want to capture the original contents of any files that are modified
-                        // so that the frontend can compute the visual diff easily!
+
                         const fileContentsBefore = {};
                         if (Array.isArray(plan.edits)) {
                             for (const edit of plan.edits) {
@@ -702,8 +866,7 @@ function startWebServer(args) {
                             dryRun: plan.apply !== true,
                             backup: args.backup
                         });
-                        
-                        // Attach the before content map so client-side diff computes instantly!
+
                         report.file_contents_before = fileContentsBefore;
 
                         res.writeHead(200, { "Content-Type": "application/json" });
@@ -754,10 +917,22 @@ function startWebServer(args) {
                         if (!data.message) {
                             throw new Error("Missing commit message.");
                         }
-                        
-                        runGitCommand(["add", "-A"], args.root);
+                        if (!data.files || typeof data.files !== "object") {
+                            throw new Error("Missing files map payload.");
+                        }
+
+                        const filesList = Object.keys(data.files);
+                        for (const file of filesList) {
+                            const fileInfo = data.files[file];
+                            if (!fileInfo.before) {
+                                runGitCommand(["add", file], args.root);
+                            } else {
+                                generateAndApplyPatch(file, fileInfo.before, fileInfo.after, args.root);
+                            }
+                        }
+
                         const output = runGitCommand(["commit", "-m", data.message], args.root);
-                        
+
                         res.writeHead(200, { "Content-Type": "application/json" });
                         res.end(JSON.stringify({ ok: true, output }));
                     } catch (err) {
@@ -977,7 +1152,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         /* Workflow Main Grid Layout (Left-to-Right Flow) */
         .workflow-container {
             display: grid;
-            grid-template-columns: 460px 1fr;
+            grid-template-columns: 460px 1fr 380px;
             height: calc(100vh - 70px);
             overflow: hidden;
         }
@@ -1211,6 +1386,17 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             gap: 20px;
         }
 
+        /* Right Column (Git Version Control & Safety Revert) */
+        .git-column {
+            background: var(--bg-panel);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            padding: 24px;
+            gap: 20px;
+        }
+
         /* Modified File Tab Switcher */
         .modified-files-bar {
             display: flex;
@@ -1413,6 +1599,17 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             transform: scale(0.98);
         }
 
+        /* Disabled state styling for buttons */
+        .action-btn:disabled, .btn-sm:disabled {
+            opacity: 0.4 !important;
+            cursor: not-allowed !important;
+            pointer-events: none !important;
+            box-shadow: none !important;
+            background: rgba(255, 255, 255, 0.05) !important;
+            border-color: rgba(255, 255, 255, 0.1) !important;
+            color: var(--text-secondary) !important;
+        }
+
         /* Toast notifications */
         .toast {
             position: fixed;
@@ -1457,7 +1654,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     <header>
         <div class="logo-area">
             <h1>🩺 Code Surgeon</h1>
-            <span class="logo-badge">v1.3.0</span>
+            <span class="logo-badge">v1.4.2</span>
             <span class="logo-badge" style="background: rgba(99,102,241,0.1); border-color: rgba(99,102,241,0.2); color: var(--accent);">Operating Room</span>
         </div>
         <div class="status-pill">
@@ -1516,9 +1713,15 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 </button>
             </div>
 
+            <!-- Animated Step-by-Step Progress Tracking -->
+            <div id="surgery-progress-container" style="display: none; width: 100%; background: var(--border); height: 6px; border-radius: 3px; margin-top: 12px; overflow: hidden; position: relative;">
+                <div id="surgery-progress-bar" style="width: 0%; height: 100%; background: var(--accent); transition: width 0.2s ease;"></div>
+            </div>
+            <div id="surgery-progress-lbl" style="display: none; font-size: 0.75rem; color: var(--text-secondary); margin-top: 6px; text-align: center; font-weight: 500;">Ready</div>
+
         </div>
 
-        <!-- VISUAL PANEL (RIGHT COLUMN) -->
+        <!-- VISUAL PANEL (MIDDLE COLUMN) -->
         <div class="visual-column">
             
             <!-- Modified Files Switcher Tabs -->
@@ -1547,44 +1750,65 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                     </div>
                 </div>
             </div>
+        </div>
 
-            <!-- Analytical & Safety Drawer -->
-            <div class="bottom-drawer">
-                <div class="drawer-stats">
-                    <div class="stat-badge">
-                        <span class="stat-badge-lbl">Total Operations</span>
+        <!-- GIT & DASHBOARD PANEL (RIGHT COLUMN) -->
+        <div class="git-column">
+            
+            <!-- Git Version Control Card -->
+            <div class="section-card" id="git-vc-card" style="display: flex; flex-direction: column; gap: 10px;">
+                <div class="card-header" style="padding-bottom: 8px; border-bottom: 1px solid var(--border);">
+                    <span class="card-title">💾 Git Version Control</span>
+                    <span style="font-size: 0.75rem; color: var(--text-secondary);" id="git-status-lbl">Ready</span>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <label style="font-size: 0.75rem; color: var(--text-secondary); font-weight: 600;">Commit Message (Fully Editable):</label>
+                    <textarea id="git-commit-msg-preview" style="width: 100%; height: 160px; background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-primary); font-family: var(--font-mono); font-size: 0.8rem; padding: 8px; resize: none;" placeholder="Commit message preview will appear here when surgery is simulated or executed..."></textarea>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+                    <div style="font-size: 0.75rem; color: var(--text-secondary);" id="git-affected-files-lbl">
+                        0 files affected
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn-sm" id="btn-git-commit" style="background: rgba(99, 102, 241, 0.1); border-color: var(--accent); color: #c7d2fe; display: flex; align-items: center; gap: 6px;" onclick="executeGitCommit()">
+                            Commit 💾
+                        </button>
+                        <button class="btn-sm" id="btn-git-push" style="background: rgba(16, 185, 129, 0.1); border-color: var(--success); color: #d1fae5; display: flex; align-items: center; gap: 6px;" onclick="executeGitPush()">
+                            Push 🚀
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Surgery Analytics Dashboard -->
+            <div class="section-card">
+                <div class="card-header" style="padding-bottom: 8px; border-bottom: 1px solid var(--border);">
+                    <span class="card-title">📊 Surgery Dashboard</span>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px;">
+                    <div class="stat-badge" style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); padding: 8px; border-radius: 4px;">
+                        <span class="stat-badge-lbl">Total Edits</span>
                         <span class="stat-badge-val" id="stat-total">0</span>
                     </div>
-                    <div class="stat-badge" style="color: var(--success);">
-                        <span class="stat-badge-lbl">Modified</span>
+                    <div class="stat-badge" style="background: rgba(16, 185, 129, 0.04); border: 1px solid rgba(16,185,129,0.15); padding: 8px; border-radius: 4px; color: var(--success);">
+                        <span class="stat-badge-lbl">Succeeded</span>
                         <span class="stat-badge-val" id="stat-success">0</span>
                     </div>
-                    <div class="stat-badge" style="color: var(--error);">
+                    <div class="stat-badge" style="background: rgba(239, 68, 68, 0.04); border: 1px solid rgba(239,68,68,0.15); padding: 8px; border-radius: 4px; color: var(--error);">
                         <span class="stat-badge-lbl">Failed</span>
                         <span class="stat-badge-val" id="stat-failed">0</span>
                     </div>
-                    <div class="stat-badge" style="color: var(--text-secondary);">
+                    <div class="stat-badge" style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); padding: 8px; border-radius: 4px; color: var(--text-secondary);">
                         <span class="stat-badge-lbl">Unchanged</span>
                         <span class="stat-badge-val" id="stat-unchanged">0</span>
                     </div>
                 </div>
+            </div>
 
-                <div id="revert-action-container" style="display: none;">
+            <!-- Analytical & Safety Drawer -->
+            <div class="bottom-drawer" style="box-shadow: none; padding: 0; background: transparent; border: none;">
+                <div id="revert-action-container" style="display: none; width: 100%;">
                     <!-- Undo Reversion button rendered dynamically if backups exist -->
-                </div>
-
-                <div class="git-action-container" style="display: flex; gap: 10px; margin-top: 4px; border-top: 1px solid var(--border); padding-top: 12px; align-items: center; justify-content: space-between;">
-                    <div style="font-size: 0.85rem; color: var(--text-secondary); display: flex; align-items: center; gap: 6px;">
-                        <span>Version Control:</span>
-                    </div>
-                    <div style="display: flex; gap: 8px;">
-                        <button class="btn-sm" id="btn-git-commit" style="background: rgba(99, 102, 241, 0.1); border-color: var(--accent); color: #c7d2fe; display: flex; align-items: center; gap: 6px;" onclick="executeGitCommit()">
-                            Stage & Commit 💾
-                        </button>
-                        <button class="btn-sm" id="btn-git-push" style="background: rgba(16, 185, 129, 0.1); border-color: var(--success); color: #d1fae5; display: flex; align-items: center; gap: 6px;" onclick="executeGitPush()">
-                            Push to Origin 🚀
-                        </button>
-                    </div>
                 </div>
             </div>
 
@@ -1603,35 +1827,20 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         let originalContentMap = {};
         let modifiedContentMap = {};
         let activeModifiedFile = null;
-        let lastReportBackups = {}; // Store backup_path maps for undo operations: { file: backup_path }
+        let lastReportBackups = {}; 
         let failedFilesMap = {};
 
-        const DEFAULT_PLAN = {
-            edits: [
-                {
-                    id: "E001",
-                    operation: "replace",
-                    file: "src/App.tsx",
-                    find: "// Alvo para substituição",
-                    replace_with: "// Substituído com sucesso via Code Surgeon!"
-                }
-            ]
-        };
-
-        // Initialize Page
         window.addEventListener('DOMContentLoaded', () => {
             document.getElementById('plan-code').value = "";
             onPlanCodeChange();
         });
 
-        // Triggered whenever code plan changes
         function onPlanCodeChange() {
             validatePlanJSON();
         }
 
         let lastValidationErrorMsg = "";
 
-        // Real-time JSON validation
         function validatePlanJSON() {
             const indicator = document.getElementById('plan-validation-indicator');
             const msgSpan = document.getElementById('validation-msg');
@@ -1639,20 +1848,33 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             
             try {
                 const planText = document.getElementById('plan-code').value;
+                if (!planText.trim()) throw new Error("Plan JSON is empty.");
                 smartParseJSON(planText);
                 msgSpan.innerText = "🟢 Valid JSON";
                 indicator.className = "validation-alert valid";
                 copyBtn.style.display = "none";
                 lastValidationErrorMsg = "";
+                updateButtonStates(true);
             } catch (err) {
                 msgSpan.innerText = "🔴 Invalid JSON: " + err.message;
                 indicator.className = "validation-alert invalid";
                 copyBtn.style.display = "inline-block";
                 lastValidationErrorMsg = err.message;
+                updateButtonStates(false);
             }
         }
 
-        // Copy validation error function
+        function updateButtonStates(isValid) {
+            const sendBtn = document.querySelector('.section-card button[onclick="updateIntentionPreview()"]');
+            const dryBtn = document.querySelector('.action-btn-dry');
+            const applyBtn = document.querySelector('.action-btn-apply');
+
+            const buttons = [sendBtn, dryBtn, applyBtn];
+            buttons.forEach(btn => {
+                if (btn) btn.disabled = !isValid;
+            });
+        }
+
         function copyValidationError(e) {
             if (e) e.stopPropagation();
             if (!lastValidationErrorMsg) return;
@@ -1663,7 +1885,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             });
         }
 
-        // Intention Parser (displays actions dynamically)
         function updateIntentionPreview() {
             const listContainer = document.getElementById('intention-preview-list');
             try {
@@ -1712,7 +1933,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             }
         }
 
-        // Execute surgery or dry run
         async function runSurgery(isRealExecution) {
             const planText = document.getElementById('plan-code').value;
             let plan;
@@ -1727,6 +1947,39 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             plan.apply = isRealExecution;
             plan.dry_run = !isRealExecution;
 
+            if (window.surgeryProgressInterval) clearInterval(window.surgeryProgressInterval);
+
+            const progContainer = document.getElementById('surgery-progress-container');
+            const progBar = document.getElementById('surgery-progress-bar');
+            const progLbl = document.getElementById('surgery-progress-lbl');
+
+            progContainer.style.display = 'block';
+            progLbl.style.display = 'block';
+            progBar.style.width = '10%';
+            progLbl.innerText = isRealExecution ? "10% - Initializing surgery on workspace..." : "10% - Initializing simulation...";
+
+            let currentProgress = 10;
+            window.surgeryProgressInterval = setInterval(() => {
+                if (currentProgress < 90) {
+                    const increment = Math.max(1, Math.floor((90 - currentProgress) / 8));
+                    currentProgress += increment;
+                    progBar.style.width = currentProgress + '%';
+                    
+                    let msg = "";
+                    if (currentProgress < 30) {
+                        msg = \`\${currentProgress}% - Loading workspace source files...\`;
+                    } else if (currentProgress < 60) {
+                        msg = \`\${currentProgress}% - Resolving search anchors and IDs...\`;
+                    } else if (currentProgress < 85) {
+                        msg = isRealExecution ? \`\${currentProgress}% - Performing structural surgery...\` : \`\${currentProgress}% - Simulating surgery dry-run...\`;
+                    } else {
+                        msg = \`\${currentProgress}% - Finalizing intention report...\`;
+                    }
+                    progLbl.innerText = msg;
+                }
+            }, 200);
+
+            let report = null;
             try {
                 showToast(isRealExecution ? "Executing surgery on workspace..." : "Simulating changes...");
                 
@@ -1736,23 +1989,20 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                     body: JSON.stringify(plan)
                 });
                 
-                const report = await res.json();
+                report = await res.json();
                 
                 if (report.error) {
                     showToast(report.error, "error");
                     return;
                 }
 
-                // Render Analytical Stats
                 updateAnalyticsDashboard(report);
 
-                // Populate file maps and display diffs
                 originalContentMap = report.file_contents_before || {};
                 modifiedContentMap = {};
                 lastReportBackups = {};
                 failedFilesMap = {};
 
-                // Populate failed files mapping
                 if (Array.isArray(report.failed)) {
                     report.failed.forEach(f => {
                         const normalized = normalizePlanFilePathClient(f.file || f.requested_file);
@@ -1764,41 +2014,33 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                     });
                 }
 
-                // Compute modified contents for all files affected
                 const filesList = [];
                 report.changed.forEach(c => {
                     if (c.status === 'changed' || c.status === 'dry_run_changed' || c.status === 'unchanged') {
-                        if (!filesList.includes(c.file)) {
-                            filesList.push(c.file);
-                        }
-                        // Save backups for revert action
-                        if (c.backup_path) {
-                            lastReportBackups[c.file] = c.backup_path;
-                        }
+                        if (!filesList.includes(c.file)) filesList.push(c.file);
+                        if (c.backup_path) lastReportBackups[c.file] = c.backup_path;
 
-                        // Compute new client-side contents with CRLF-to-LF normalization
-                        const originalCode = (originalContentMap[c.file] || "").replace(/\\r\\n/g, "\\n");
+                        // DO NOT forcefully strip original newlines here
+                        const originalCode = originalContentMap[c.file] || "";
                         try {
                             modifiedContentMap[c.file] = applyPlanClientSide(plan, originalCode, c.file);
                         } catch (e) {
-                            modifiedContentMap[c.file] = originalCode; // Fallback
+                            modifiedContentMap[c.file] = originalCode; 
                         }
                     }
                 });
 
-                // Failures might also affect file lists
                 report.failed.forEach(f => {
                     const normalized = normalizePlanFilePathClient(f.file || f.requested_file);
-                    if (!filesList.includes(normalized)) {
-                        filesList.push(normalized);
-                    }
+                    if (!filesList.includes(normalized)) filesList.push(normalized);
                 });
 
-                // Render Modified Files Tab Switcher
                 renderModifiedFilesSwitcher(filesList);
-
-                // Show revert/undo actions if any backup was generated
                 renderRevertSafetyActions(isRealExecution);
+
+                const affectedFiles = Object.keys(lastReportBackups);
+                document.getElementById('git-affected-files-lbl').innerText = \`\${affectedFiles.length} file\${affectedFiles.length !== 1 ? 's' : ''} affected\`;
+                document.getElementById('git-commit-msg-preview').value = generateGitCommitMessage();
 
                 if (report.ok) {
                     showToast(isRealExecution ? "Surgery executed SUCCESSFULLY!" : "Simulation completed!");
@@ -1808,10 +2050,17 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
             } catch (err) {
                 showToast("Error during operation: " + err.message, "error");
+            } finally {
+                if (window.surgeryProgressInterval) clearInterval(window.surgeryProgressInterval);
+                progBar.style.width = '100%';
+                progLbl.innerText = (report && report.ok) ? '100% - Surgery completed successfully! 🟢' : '100% - Surgery completed with errors! 🔴';
+                setTimeout(() => {
+                    progContainer.style.display = 'none';
+                    progLbl.style.display = 'none';
+                }, 3000);
             }
         }
 
-        // Render file tabs that were modified by the surgery plan
         function renderModifiedFilesSwitcher(filesList) {
             const container = document.getElementById('modified-files-bar-container');
             
@@ -1823,9 +2072,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
             container.innerHTML = filesList.map((file, idx) => {
                 const isActive = (activeModifiedFile === file || (!activeModifiedFile && idx === 0)) ? 'active' : '';
-                if (!activeModifiedFile && idx === 0) {
-                    activeModifiedFile = file;
-                }
+                if (!activeModifiedFile && idx === 0) activeModifiedFile = file;
                 const hasFailed = failedFilesMap[file];
                 const badge = hasFailed ? '<span style="color: #ef4444; font-weight: bold; margin-left: 6px;">⚠️</span>' : '';
                 const tabStyle = hasFailed ? 'border-color: rgba(239, 68, 68, 0.4);' : '';
@@ -1836,12 +2083,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 \`;
             }).join('');
 
-            if (activeModifiedFile) {
-                selectModifiedFile(activeModifiedFile);
-            }
+            if (activeModifiedFile) selectModifiedFile(activeModifiedFile);
         }
 
-        // Clear visual diff pane
         function clearDiffWindow() {
             document.getElementById('active-diff-file-label').innerText = "🩺 Visual Diff of Changes";
             document.getElementById('active-diff-stats-label').innerText = "No files processed.";
@@ -1857,21 +2101,17 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             }
         }
 
-        // Select a file from the switcher to view diff
         function selectModifiedFile(filePath) {
             activeModifiedFile = filePath;
             
-            // Highlight active tab
             document.querySelectorAll('.m-file-tab').forEach(tab => {
-                if (tab.innerText.includes(filePath)) {
-                    tab.classList.add('active');
-                } else {
-                    tab.classList.remove('active');
-                }
+                if (tab.innerText.includes(filePath)) tab.classList.add('active');
+                else tab.classList.remove('active');
             });
 
             document.getElementById('active-diff-file-label').innerText = "📄 " + filePath;
 
+            // Only normalize here so visual diff LCS engine works smoothly without newline mismatches
             const originalCode = (originalContentMap[filePath] || "").replace(/\\r\\n/g, "\\n");
             let modifiedCode = (modifiedContentMap[filePath] || "").replace(/\\r\\n/g, "\\n");
 
@@ -1881,8 +2121,15 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 modifiedCode = originalCode;
                 warningBanner.style.display = 'block';
                 warningBanner.innerHTML = \`
-                    <div style="background: rgba(239, 68, 68, 0.12); border-left: 4px solid #ef4444; padding: 12px 16px; margin: 12px; border-radius: 4px; font-size: 0.85rem; color: #fca5a5; display: flex; flex-direction: column; gap: 4px; border: 1px solid rgba(239, 68, 68, 0.25);">
-                        <strong style="display: flex; align-items: center; gap: 6px;"><span style="font-size: 1.1rem;">⚠️</span> Surgery Failed on Workspace (\${failedInfo.id || 'No ID'} - \${failedInfo.operation || 'Unknown'})</strong>
+                    <div style="background: rgba(239, 68, 68, 0.12); border-left: 4px solid #ef4444; padding: 12px 16px; margin: 12px; border-radius: 4px; font-size: 0.85rem; color: #fca5a5; display: flex; flex-direction: column; gap: 8px; border: 1px solid rgba(239, 68, 68, 0.25);">
+                        <strong style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+                            <span style="display: flex; align-items: center; gap: 6px;">
+                                <span style="font-size: 1.1rem;">⚠️</span> Surgery Failed on Workspace (\${failedInfo.id || 'No ID'} - \${failedInfo.operation || 'Unknown'})
+                            </span>
+                            <button class="btn-sm" style="background: rgba(239, 68, 68, 0.25); border-color: rgba(239, 68, 68, 0.45); color: #fecaca; display: flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 0.75rem;" onclick="copyErrorForAI('\${filePath}')">
+                                📋 Copy Error for AI
+                            </button>
+                        </strong>
                         <div style="opacity: 0.9; margin-top: 2px;">
                             Error in file <code>\${filePath}</code>: <span style="font-family: var(--font-mono); font-weight: bold; background: rgba(0,0,0,0.2); padding: 1px 4px; border-radius: 3px; color: #fecaca;">\${failedInfo.error}</span>
                         </div>
@@ -1896,7 +2143,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             renderDiff(originalCode, modifiedCode);
         }
 
-        // Update statistics drawer
         function updateAnalyticsDashboard(report) {
             const total = report.changed.length + report.failed.length;
             const succeeded = report.changed.filter(c => c.status === 'changed' || c.status === 'dry_run_changed').length;
@@ -1909,7 +2155,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             document.getElementById('stat-unchanged').innerText = unchanged;
         }
 
-        // Render Undo / Revert operations
         function renderRevertSafetyActions(isRealExecution) {
             const container = document.getElementById('revert-action-container');
             const filesWithBackups = Object.keys(lastReportBackups);
@@ -1931,34 +2176,27 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             }).join('');
         }
 
-        // Revert a workspace file to its backup
         async function revertWorkspaceFile(targetFile, backupPath) {
             try {
                 showToast(\`Restaurando backup de \${targetFile}...\`);
                 const res = await fetch('/api/revert', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        target_file: targetFile,
-                        backup_path: backupPath
-                    })
+                    body: JSON.stringify({ target_file: targetFile, backup_path: backupPath })
                 });
 
                 const data = await res.json();
                 if (data.ok) {
                     showToast("Surgery reverted SUCCESSFULLY!", "success");
                     
-                    // Reset maps and reload contents
                     try {
                         const fileRes = await fetch(\`/api/read?file=\${encodeURIComponent(targetFile)}\`);
                         const fileData = await fileRes.json();
                         originalContentMap[targetFile] = fileData.content;
                         modifiedContentMap[targetFile] = fileData.content;
-                        
                         selectModifiedFile(targetFile);
                     } catch (e) {}
 
-                    // Hide revert buttons since undo is completed
                     delete lastReportBackups[targetFile];
                     renderRevertSafetyActions(true);
                 } else {
@@ -1969,54 +2207,49 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             }
         }
 
-        // Computes unified diff with prefix/suffix trimming and context collapsing
         function renderDiff(one, other) {
             const lines1 = one.split('\\n');
             const lines2 = other.split('\\n');
             const n = lines1.length;
             const m = lines2.length;
             
-            // 1. Find common prefix
             let prefixLines = 0;
             while (prefixLines < n && prefixLines < m && lines1[prefixLines] === lines2[prefixLines]) {
                 prefixLines++;
             }
             
-            // 2. Find common suffix
             let suffixLines = 0;
             while (suffixLines < (n - prefixLines) && suffixLines < (m - prefixLines) && 
                    lines1[n - 1 - suffixLines] === lines2[m - 1 - suffixLines]) {
                 suffixLines++;
             }
             
-            // 3. Extract the changed middle segment
             const mid1 = lines1.slice(prefixLines, n - suffixLines);
             const mid2 = lines2.slice(prefixLines, m - suffixLines);
             
             let diff = [];
             
-            // If there are changes, compute LCS diff on the middle segment
             if (mid1.length > 0 || mid2.length > 0) {
-                // If middle segment itself is too large to do DP safely, fallback to a fast side-by-side replacement list
-                if (mid1.length + mid2.length > 1500) {
-                    mid1.forEach((line, idx) => {
-                        diff.push({ type: 'removed', value: line, line1: prefixLines + idx + 1 });
-                    });
-                    mid2.forEach((line, idx) => {
-                        diff.push({ type: 'added', value: line, line2: prefixLines + idx + 1 });
-                    });
+                const len1 = mid1.length;
+                const len2 = mid2.length;
+                
+                // Fallback apenas para arquivos absurdamente gigantes (> 8000 linhas no meio do diff)
+                if (len1 * len2 > 64000000) {
+                    mid1.forEach((line, idx) => diff.push({ type: 'removed', value: line, line1: prefixLines + idx + 1 }));
+                    mid2.forEach((line, idx) => diff.push({ type: 'added', value: line, line2: prefixLines + idx + 1 }));
                 } else {
-                    // Compute DP LCS diff on the middle segment
-                    const len1 = mid1.length;
-                    const len2 = mid2.length;
-                    const dp = Array.from({ length: len1 + 1 }, () => new Int32Array(len2 + 1));
+                    // Matriz DP 1D ultrarrápida usando Typed Arrays
+                    const cols = len2 + 1;
+                    const dp = new Int32Array((len1 + 1) * cols);
                     
                     for (let i = 1; i <= len1; i++) {
+                        let i_pos = i * cols;
+                        let i_prev_pos = (i - 1) * cols;
                         for (let j = 1; j <= len2; j++) {
                             if (mid1[i - 1] === mid2[j - 1]) {
-                                dp[i][j] = dp[i - 1][j - 1] + 1;
+                                dp[i_pos + j] = dp[i_prev_pos + (j - 1)] + 1;
                             } else {
-                                dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+                                dp[i_pos + j] = Math.max(dp[i_prev_pos + j], dp[i_pos + (j - 1)]);
                             }
                         }
                     }
@@ -2024,14 +2257,15 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                     const midDiff = [];
                     let i = len1, j = len2;
                     while (i > 0 || j > 0) {
+                        let i_pos = i * cols;
+                        let i_prev_pos = (i - 1) * cols;
                         if (i > 0 && j > 0 && mid1[i - 1] === mid2[j - 1]) {
                             midDiff.push({ type: 'equal', value: mid1[i - 1], line1: prefixLines + i, line2: prefixLines + j });
-                            i--;
-                            j--;
-                        } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+                            i--; j--;
+                        } else if (j > 0 && (i === 0 || dp[i_pos + (j - 1)] >= dp[i_prev_pos + j])) {
                             midDiff.push({ type: 'added', value: mid2[j - 1], line2: prefixLines + j });
                             j--;
-                        } else if (i > 0 && (j === 0 || dp[i][j - 1] < dp[i - 1][j])) {
+                        } else if (i > 0 && (j === 0 || dp[i_pos + (j - 1)] < dp[i_prev_pos + j])) {
                             midDiff.push({ type: 'removed', value: mid1[i - 1], line1: prefixLines + i });
                             i--;
                         }
@@ -2041,30 +2275,19 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 }
             }
             
-            // Total stats counters
             let additions = 0;
             let deletions = 0;
-            
             diff.forEach(d => {
                 if (d.type === 'added') additions++;
                 if (d.type === 'removed') deletions++;
             });
             
-            // Render helper for single row
             function makeRowHtml(line1, line2, type, value) {
                 let classType = "";
                 let indicator = " ";
-                if (type === 'added') {
-                    classType = "add-line";
-                    indicator = "+";
-                } else if (type === 'removed') {
-                    classType = "del-line";
-                    indicator = "-";
-                }
-                const safeValue = value
-                    .replace(/&/g, "&amp;")
-                    .replace(/</g, "&lt;")
-                    .replace(/>/g, "&gt;");
+                if (type === 'added') { classType = "add-line"; indicator = "+"; } 
+                else if (type === 'removed') { classType = "del-line"; indicator = "-"; }
+                const safeValue = value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
                 return \`
                     <div class="diff-tr \${classType}">
                         <div class="diff-td-num">\${line1 || ""}</div>
@@ -2074,49 +2297,24 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 \`;
             }
             
-            // Build unified flat array of all comparison lines
             let allLines = [];
-            
-            // A. Prefix lines (all equal)
-            for (let idx = 0; idx < prefixLines; idx++) {
-                allLines.push({ type: 'equal', value: lines1[idx], line1: idx + 1, line2: idx + 1 });
-            }
-            
-            // B. Middle lines
+            for (let idx = 0; idx < prefixLines; idx++) allLines.push({ type: 'equal', value: lines1[idx], line1: idx + 1, line2: idx + 1 });
             allLines.push(...diff);
-            
-            // C. Suffix lines (all equal)
             const suffixStartIdx = n - suffixLines;
             const suffixStartIdx2 = m - suffixLines;
             for (let idx = 0; idx < suffixLines; idx++) {
-                allLines.push({
-                    type: 'equal',
-                    value: lines1[suffixStartIdx + idx],
-                    line1: suffixStartIdx + idx + 1,
-                    line2: suffixStartIdx2 + idx + 1
-                });
+                allLines.push({ type: 'equal', value: lines1[suffixStartIdx + idx], line1: suffixStartIdx + idx + 1, line2: suffixStartIdx2 + idx + 1 });
             }
             
-            // Context-collapsing logic
-            const CONTEXT_LINES = 3; // Let's focus on 3 lines of context before/after changes
+            const CONTEXT_LINES = 3; 
             const keep = new Uint8Array(allLines.length);
-            
-            // 1. Mark additions & deletions
             for (let i = 0; i < allLines.length; i++) {
-                if (allLines[i].type === 'added' || allLines[i].type === 'removed') {
-                    keep[i] = 1;
-                }
+                if (allLines[i].type === 'added' || allLines[i].type === 'removed') keep[i] = 1;
             }
-            
-            // 2. Spread keep outward by CONTEXT_LINES
             for (let i = 0; i < allLines.length; i++) {
                 if (allLines[i].type === 'added' || allLines[i].type === 'removed') {
-                    for (let j = Math.max(0, i - CONTEXT_LINES); j < i; j++) {
-                        keep[j] = 1;
-                    }
-                    for (let j = i + 1; j <= Math.min(allLines.length - 1, i + CONTEXT_LINES); j++) {
-                        keep[j] = 1;
-                    }
+                    for (let j = Math.max(0, i - CONTEXT_LINES); j < i; j++) keep[j] = 1;
+                    for (let j = i + 1; j <= Math.min(allLines.length - 1, i + CONTEXT_LINES); j++) keep[j] = 1;
                 }
             }
             
@@ -2138,9 +2336,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                         hiddenCount = 0;
                     }
                     html += makeRowHtml(allLines[i].line1, allLines[i].line2, allLines[i].type, allLines[i].value);
-                } else {
-                    hiddenCount++;
-                }
+                } else hiddenCount++;
             }
             
             if (hiddenCount > 0) {
@@ -2155,7 +2351,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 \`;
             }
             
-            // If absolutely no changes were detected
             if (prefixLines === n && suffixLines === n && n === m) {
                 html = \`
                     <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
@@ -2167,7 +2362,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             const diffBody = document.getElementById('diff-visual-output-container');
             diffBody.innerHTML = \`<div class="diff-line-table">\${html}</div>\`;
             
-            // Update stats labels
             document.getElementById('active-diff-stats-label').innerText = \`+\\u0020\${additions} additions, -\\u0020\${deletions} deletions\`;
         }
 
@@ -2175,10 +2369,8 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             try {
                 const planText = document.getElementById('plan-code').value;
                 const plan = smartParseJSON(planText);
-                
                 let msg = "";
                 
-                // 1. General Header
                 let fileOperations = [];
                 if (Array.isArray(plan.edits)) {
                     plan.edits.forEach(edit => {
@@ -2187,13 +2379,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                     });
                 }
                 
-                if (fileOperations.length > 0) {
-                    msg += \`surgery: \${fileOperations.join(', ')}\\n\\n\`;
-                } else {
-                    msg += \`surgery: Applied JSON changes\\n\\n\`;
-                }
+                if (fileOperations.length > 0) msg += \`surgery: \${fileOperations.join(', ')}\\n\\n\`;
+                else msg += \`surgery: Applied JSON changes\\n\\n\`;
                 
-                // 2. Edits reasons
                 if (Array.isArray(plan.edits) && plan.edits.length > 0) {
                     msg += \`Planned Edits:\\n\`;
                     plan.edits.forEach((edit, idx) => {
@@ -2206,28 +2394,21 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                     msg += \`\\n\`;
                 }
                 
-                // 3. Expected Result
                 if (plan.validation && plan.validation.expected_result) {
                     msg += \`Expected Validation Result:\\n- \${plan.validation.expected_result}\\n\\n\`;
                 }
                 
-                // 4. Notes
                 if (plan.notes) {
                     msg += \`Surgery Notes:\\n\`;
-                    if (typeof plan.notes === 'string') {
-                        msg += \`- \${plan.notes}\\n\`;
-                    } else {
+                    if (typeof plan.notes === 'string') msg += \`- \${plan.notes}\\n\`;
+                    else {
                         if (plan.notes.risk_level) msg += \`- Risk level: \${plan.notes.risk_level}\\n\`;
                         if (plan.notes.requires_manual_review) msg += \`- Requires manual review: \${plan.notes.requires_manual_review}\\n\`;
-                        // Any other fields
                         for (let k in plan.notes) {
-                            if (k !== 'risk_level' && k !== 'requires_manual_review') {
-                                msg += \`- \${k}: \${plan.notes[k]}\\n\`;
-                            }
+                            if (k !== 'risk_level' && k !== 'requires_manual_review') msg += \`- \${k}: \${plan.notes[k]}\\n\`;
                         }
                     }
                 }
-                
                 return msg.trim();
             } catch (err) {
                 return "surgery: Applied code surgery plan";
@@ -2235,87 +2416,150 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         }
 
         async function executeGitCommit() {
-            const commitMsg = generateGitCommitMessage();
+            const files = Object.keys(lastReportBackups);
+            if (files.length === 0) {
+                showToast("No executed surgery files found to commit.", "warning");
+                return;
+            }
+
+            const filesData = {};
+            files.forEach(file => {
+                filesData[file] = {
+                    before: originalContentMap[file] || "",
+                    after: modifiedContentMap[file] || ""
+                };
+            });
+
+            const commitMsg = document.getElementById('git-commit-msg-preview').value;
+            if (!commitMsg.trim()) {
+                showToast("Commit message cannot be empty.", "warning");
+                return;
+            }
+
             try {
-                showToast("Staging and committing files...");
+                showToast("Staging and committing specific surgery lines...");
                 const res = await fetch('/api/git-commit', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: commitMsg })
+                    body: JSON.stringify({ message: commitMsg, files: filesData })
                 });
                 const data = await res.json();
-                if (data.error) {
-                    showToast("Commit failed: " + data.error, "error");
-                } else {
-                    showToast("Staged and Committed SUCCESSFULLY!", "success");
-                    console.log("Git Output:", data.output);
-                }
+                if (data.error) showToast("Commit failed: " + data.error, "error");
+                else showToast("Surgical changes Committed SUCCESSFULLY!", "success");
             } catch (err) {
                 showToast("Network error during commit: " + err.message, "error");
             }
         }
 
+        function copyErrorForAI(filePath) {
+            const failedInfo = failedFilesMap[filePath];
+            if (!failedInfo) return;
+
+            const planText = document.getElementById('plan-code').value;
+            let edit = null;
+            let targetEditJson = "";
+            try {
+                const plan = smartParseJSON(planText);
+                edit = plan.edits.find(e => e.id === failedInfo.id || normalizePlanFilePathClient(e.file) === filePath);
+                if (edit) targetEditJson = JSON.stringify(edit, null, 4);
+            } catch (e) {}
+
+            let diagnostics = "";
+            const fileContent = originalContentMap[filePath];
+            if (fileContent === undefined || fileContent === null) {
+                diagnostics += "- File Status: \u274c File DOES NOT exist in workspace!\\n";
+            } else {
+                const fileLines = fileContent.replace(/\\r\\n/g, "\\n").split('\\n');
+                const totalLinesCount = fileLines.length;
+                diagnostics += "- File Status: \ud83d\udcc4 File exists (" + totalLinesCount + " lines total).\\n";
+
+                const bt = String.fromCharCode(96);
+
+                if (edit) {
+                    if (edit.line_start !== undefined || edit.line_end !== undefined) {
+                        const lStart = Number(edit.line_start);
+                        const lEnd = Number(edit.line_end);
+                        if (lStart > totalLinesCount || lEnd > totalLinesCount) {
+                            diagnostics += "- Diagnosis: \u26a0\ufe0f Out of Bounds! The plan requested lines " + lStart + " to " + lEnd + ", but the file only has " + totalLinesCount + " lines.\\n";
+                        } else {
+                            const actualLinesContent = fileLines.slice(lStart - 1, lEnd).join('\\n');
+                            diagnostics += "- Actual content at lines " + lStart + " to " + lEnd + " in the file:\\n" +
+                                bt + bt + bt + "\\n" + actualLinesContent + "\\n" + bt + bt + bt + "\\n";
+                        }
+                    }
+                    if (edit.find) {
+                        const findAnchor = String(edit.find).trim();
+                        const firstLineFind = findAnchor.split('\\n')[0].trim();
+                        
+                        let partialMatches = [];
+                        if (firstLineFind.length > 4) {
+                            fileLines.forEach((line, idx) => {
+                                if (line.toLowerCase().includes(firstLineFind.toLowerCase()) || 
+                                    (line.trim().length > 4 && firstLineFind.toLowerCase().includes(line.trim().toLowerCase()))) {
+                                    if (partialMatches.length < 5) partialMatches.push("- Line " + (idx + 1) + ": " + bt + line.trim() + bt);
+                                }
+                            });
+                        }
+                        
+                        if (partialMatches.length > 0) {
+                            diagnostics += "- Diagnosis: \ud83d\udd0d Similar lines found in the file (did you mean one of these?):\\n" + partialMatches.join('\\n') + "\\n";
+                        } else {
+                            diagnostics += "- Diagnosis: \u274c The anchor text was not found anywhere in the file. Indentation, spaces, or capitalization might be different.\\n";
+                        }
+                    }
+                }
+            }
+
+            const prompt = "Code Surgery Failed:\\n" +
+                "- File: " + filePath + "\\n" +
+                "- Edit ID: " + (failedInfo.id || "N/A") + "\\n" +
+                "- Operation: " + (failedInfo.operation || "N/A") + "\\n" +
+                "- Error: " + failedInfo.error + "\\n\\n" +
+                "Diagnostic Information:\\n" +
+                diagnostics + "\\n" +
+                "Please fix the edit with ID " + (failedInfo.id || "N/A") + " based on the diagnostic above.";
+
+            navigator.clipboard.writeText(prompt).then(() => {
+                showToast("Failure report copied for AI! \ud83d\udccb", "success");
+            }).catch(() => {
+                showToast("Failed to copy error report", "error");
+            });
+        }
+
         async function executeGitPush() {
             try {
                 showToast("Pushing changes to Git origin...");
-                const res = await fetch('/api/git-push', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
+                const res = await fetch('/api/git-push', { method: 'POST', headers: { 'Content-Type': 'application/json' }});
                 const data = await res.json();
-                if (data.error) {
-                    showToast("Push failed: " + data.error, "error");
-                } else {
-                    showToast("Pushed to Origin SUCCESSFULLY!", "success");
-                    console.log("Git Output:", data.output);
-                }
+                if (data.error) showToast("Push failed: " + data.error, "error");
+                else showToast("Pushed to Origin SUCCESSFULLY!", "success");
             } catch (err) {
                 showToast("Network error during push: " + err.message, "error");
             }
         }
 
-        // Helpers
         function escapeHtml(text) {
-            return String(text ?? "")
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;");
+            return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         }
 
         function extractJsonFromFencedBlockClient(input) {
             const text = String(input ?? "").trim();
             const fence = String.fromCharCode(96, 96, 96);
             const newline = String.fromCharCode(10);
-
-            if (!text.startsWith(fence)) {
-                return text;
-            }
-
+            if (!text.startsWith(fence)) return text;
             const firstLineEnd = text.indexOf(newline);
-            if (firstLineEnd === -1) {
-                return text;
-            }
-
+            if (firstLineEnd === -1) return text;
             const openingFence = text.slice(0, firstLineEnd).trim().toLowerCase();
-            if (openingFence !== fence && openingFence !== fence + "json") {
-                return text;
-            }
-
+            if (openingFence !== fence && openingFence !== fence + "json") return text;
             let body = text.slice(firstLineEnd + 1).trim();
-            if (body.endsWith(fence)) {
-                body = body.slice(0, -fence.length).trim();
-            }
-
+            if (body.endsWith(fence)) body = body.slice(0, -fence.length).trim();
             return body;
         }
 
         function smartParseJSON(rawText) {
             let clean = extractJsonFromFencedBlockClient(rawText);
-            // Remove single-line comments (// ...)
             clean = clean.replace(/\\/\\/.*/g, '');
-            // Remove multi-line comments (/* ... */)
             clean = clean.replace(/\\/\\*[\\s\\S]*?\\*\\//g, '');
-            // Remove trailing commas before closing braces/brackets
             clean = clean.replace(/,([\\s]*[\\]}])/g, '$1');
             return JSON.parse(clean);
         }
@@ -2326,22 +2570,13 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         }
 
         function normalizePlanFilePathClient(filePath) {
-            return String(filePath ?? "")
-                .replace(/\\\\/g, "/")
-                .replace(/^\\.\\/+/, "")
-                .replace(/^\\/+/, "")
-                .split("/")
-                .filter(Boolean)
-                .join("/");
+            return String(filePath ?? "").replace(/\\\\/g, "/").replace(/^\\.\\/+/, "").replace(/^\\/+/, "").split("/").filter(Boolean).join("/");
         }
 
         function clientEditTargetsFile(generatedPath, targetFile) {
             const generated = normalizePlanFilePathClient(generatedPath);
             const target = normalizePlanFilePathClient(targetFile);
-
-            return generated === target ||
-                generated.endsWith("/" + target) ||
-                target.endsWith("/" + generated);
+            return generated === target || generated.endsWith("/" + target) || target.endsWith("/" + generated);
         }
 
         function formatPlan() {
@@ -2358,80 +2593,36 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
         function tryFixJSON(rawText) {
             let clean = extractJsonFromFencedBlockClient(rawText);
-            
-            // Character by character scan to escape raw newlines inside double-quoted strings
             let result = "";
             let inString = false;
             let escaped = false;
-            
             for (let i = 0; i < clean.length; i++) {
                 const char = clean[i];
-                
                 if (inString) {
-                    if (char === "\\\\") {
-                        escaped = !escaped;
-                        result += char;
-                    } else if (char === '"') {
-                        if (escaped) {
-                            result += char;
-                            escaped = false;
-                        } else {
-                            inString = false;
-                            result += char;
-                        }
-                    } else if (char === "\\n") {
-                        result += "\\\\n";
+                    if (char === "\\\\") { escaped = !escaped; result += char; } 
+                    else if (char === '"') {
+                        if (escaped) { result += char; escaped = false; } 
+                        else { inString = false; result += char; }
+                    } else if (char === "\\n") { result += "\\\\n"; escaped = false; } 
+                    else if (char === "\\r") {
+                        if (clean[i + 1] !== "\\n") result += "\\\\r";
                         escaped = false;
-                    } else if (char === "\\r") {
-                        if (clean[i + 1] === "\\n") {
-                            // skip carriage return if followed by newline
-                        } else {
-                            result += "\\\\r";
-                        }
-                        escaped = false;
-                    } else {
-                        result += char;
-                        escaped = false;
-                    }
+                    } else { result += char; escaped = false; }
                 } else {
-                    if (char === '"') {
-                        inString = true;
-                        escaped = false;
-                        result += char;
-                    } else {
-                        result += char;
-                    }
+                    if (char === '"') { inString = true; escaped = false; result += char; } 
+                    else result += char;
                 }
             }
-            
-            let finalClean = result;
-            finalClean = finalClean.replace(/\\/\\/.*/g, '');
-            finalClean = finalClean.replace(/\\/\\*[\\s\\S]*?\\*\\//g, '');
-            finalClean = finalClean.replace(/,([\\s]*[\\]}])/g, '$1');
-            
-            try {
-                const parsed = JSON.parse(finalClean);
-                return JSON.stringify(parsed, null, 4);
-            } catch (err) {
-                return finalClean;
-            }
+            let finalClean = result.replace(/\\/\\/.*/g, '').replace(/\\/\\*[\\s\\S]*?\\*\\//g, '').replace(/,([\\s]*[\\]}])/g, '$1');
+            try { return JSON.stringify(JSON.parse(finalClean), null, 4); } catch (err) { return finalClean; }
         }
 
         function onTryFixJson() {
             const textarea = document.getElementById('plan-code');
-            const originalVal = textarea.value;
-            if (!originalVal.trim()) {
-                showToast("JSON is empty.", "warning");
-                return;
-            }
-            
-            const fixed = tryFixJSON(originalVal);
+            if (!textarea.value.trim()) { showToast("JSON is empty.", "warning"); return; }
+            const fixed = tryFixJSON(textarea.value);
             textarea.value = fixed;
-            
-            // Re-validate JSON
             validatePlanJSON();
-            
-            // Check if it's now valid JSON
             try {
                 smartParseJSON(fixed);
                 showToast("JSON fixed and formatted successfully!", "success");
@@ -2440,108 +2631,103 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             }
         }
 
-
-
         function showToast(message, type = "success") {
             const toast = document.getElementById('toast-notif');
             toast.innerText = message;
             toast.className = \`toast show \${type}\`;
-            setTimeout(() => {
-                toast.classList.remove('show');
-            }, 3000);
+            setTimeout(() => toast.classList.remove('show'), 3000);
         }
 
         // ==========================================
         // CLIENT-SIDE CODE SURGERY SIMULATION ENGINE
         // ==========================================
         function applyPlanClientSide(plan, originalText, targetFile) {
-            let workingText = String(originalText ?? "").replace(/\\r\\n/g, "\\n");
-            
+            let workingText = String(originalText ?? ""); 
             plan.edits.forEach(edit => {
                 if (!clientEditTargetsFile(edit.file, targetFile)) return;
-
                 if (edit.operation === "create_file") {
-                    workingText = String(edit.content ?? "").replace(/\\r\\n/g, "\\n");
+                    workingText = String(edit.content ?? "");
                     return;
                 }
-
                 workingText = clientApplyEdit(workingText, edit);
             });
-
             return workingText;
         }
 
         function clientApplyEdit(content, edit) {
-            const find = edit.find ? String(edit.find).replace(/\\r\\n/g, "\\n") : edit.find;
-            const replace_with = edit.replace_with ? String(edit.replace_with).replace(/\\r\\n/g, "\\n") : edit.replace_with;
+            const find = edit.find; 
+            const replace_with = edit.replace_with;
             const occurrence = edit.occurrence || "unique";
+
+            const predominantLineEnding = (content.match(/\\r\\n/g) || []).length > (content.match(/\\n/g) || []).length / 2 ? "\\r\\n" : "\\n";
 
             switch (edit.operation) {
                 case "replace":
-                    if (typeof find === "string") {
-                        return clientReplaceMatches(content, find, replace_with, occurrence);
-                    }
+                    if (typeof find === "string") return clientReplaceMatches(content, find, replace_with, occurrence);
                     const range = clientGetLineOffsets(content, edit.line_start, edit.line_end);
-                    return content.slice(0, range.start) + replace_with + content.slice(range.end);
-                
+                    const replacement = String(replace_with || "").replace(/\\r\\n/g, "\\n").replace(/\\n/g, predominantLineEnding);
+                    return content.slice(0, range.start) + replacement + content.slice(range.end);
                 case "insert_before":
-                    return clientInsertMatches(content, find, String(edit.insert ?? edit.content ?? "").replace(/\\r\\n/g, "\\n"), occurrence, "before");
-                
+                    return clientInsertMatches(content, find, edit.insert ?? edit.content, occurrence, "before");
                 case "insert_after":
-                    return clientInsertMatches(content, find, String(edit.insert ?? edit.content ?? "").replace(/\\r\\n/g, "\\n"), occurrence, "after");
-                
+                    return clientInsertMatches(content, find, edit.insert ?? edit.content, occurrence, "after");
                 case "delete":
-                    if (typeof find === "string") {
-                        return clientDeleteMatches(content, find, occurrence);
-                    }
+                    if (typeof find === "string") return clientDeleteMatches(content, find, occurrence);
                     const delRange = clientGetLineOffsets(content, edit.line_start, edit.line_end);
                     return content.slice(0, delRange.start) + content.slice(delRange.end);
-                
                 case "append":
-                    return content + String(edit.content ?? edit.insert ?? "").replace(/\\r\\n/g, "\\n");
-                
+                    return content + String(edit.content ?? edit.insert ?? "").replace(/\\r\\n/g, "\\n").replace(/\\n/g, predominantLineEnding);
                 case "prepend":
-                    return String(edit.content ?? edit.insert ?? "").replace(/\\r\\n/g, "\\n") + content;
-                
+                    return String(edit.content ?? edit.insert ?? "").replace(/\\r\\n/g, "\\n").replace(/\\n/g, predominantLineEnding) + content;
                 case "ensure_import":
                     return clientEnsureImport(content, edit);
-
                 default:
                     throw new Error("Operation not supported or cannot be simulated in sandbox.");
             }
         }
 
         function clientReplaceMatches(content, anchor, replacement, occurrence) {
-            const positions = clientSelectMatches(content, anchor, occurrence);
+            const predominantLineEnding = (content.match(/\\r\\n/g) || []).length > (content.match(/\\n/g) || []).length / 2 ? "\\r\\n" : "\\n";
+            const replacementAdapted = String(replacement || "").replace(/\\r\\n/g, "\\n").replace(/\\n/g, predominantLineEnding);
+            const matches = clientSelectMatches(content, anchor, occurrence);
             let output = content;
-            for (const pos of [...positions].reverse()) {
-                output = output.slice(0, pos) + replacement + output.slice(pos + anchor.length);
+            for (const match of [...matches].reverse()) {
+                output = output.slice(0, match.index) + replacementAdapted + output.slice(match.index + match.length);
             }
             return output;
         }
 
         function clientInsertMatches(content, anchor, insertion, occurrence, mode) {
-            const positions = clientSelectMatches(content, anchor, occurrence);
+            const predominantLineEnding = (content.match(/\\r\\n/g) || []).length > (content.match(/\\n/g) || []).length / 2 ? "\\r\\n" : "\\n";
+            const insertionAdapted = String(insertion || "").replace(/\\r\\n/g, "\\n").replace(/\\n/g, predominantLineEnding);
+            const matches = clientSelectMatches(content, anchor, occurrence);
             let output = content;
-            for (const pos of [...positions].reverse()) {
-                const insertAt = mode === "before" ? pos : pos + anchor.length;
-                output = output.slice(0, insertAt) + insertion + output.slice(insertAt);
+            for (const match of [...matches].reverse()) {
+                const insertAt = mode === "before" ? match.index : match.index + match.length;
+                output = output.slice(0, insertAt) + insertionAdapted + output.slice(insertAt);
             }
             return output;
         }
 
         function clientDeleteMatches(content, anchor, occurrence) {
-            const positions = clientSelectMatches(content, anchor, occurrence);
+            const matches = clientSelectMatches(content, anchor, occurrence);
             let output = content;
-            for (const pos of [...positions].reverse()) {
-                output = output.slice(0, pos) + output.slice(pos + anchor.length);
+            for (const match of [...matches].reverse()) {
+                output = output.slice(0, match.index) + output.slice(match.index + match.length);
             }
             return output;
         }
 
         function clientEnsureImport(content, edit) {
-            const statement = edit.import_statement ?? edit.content;
-            if (content.includes(statement)) return content;
+            const predominantLineEnding = (content.match(/\\r\\n/g) || []).length > (content.match(/\\n/g) || []).length / 2 ? "\\r\\n" : "\\n";
+            let statement = edit.import_statement ?? edit.content;
+            statement = String(statement || "").replace(/\\r\\n/g, "\\n").replace(/\\n/g, predominantLineEnding);
+
+            if (!statement.trim()) throw new Error("ensure_import requires import_statement or content.");
+            if (content.replace(/\\r\\n/g, "\\n").includes(String(edit.import_statement ?? edit.content).replace(/\\r\\n/g, "\\n"))) {
+                return content;
+            }
+
             const lines = content.split('\\n');
             let lastImportLine = -1;
             for (let i = 0; i < lines.length; i++) {
@@ -2552,40 +2738,82 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 }
             }
             if (lastImportLine >= 0) {
-                lines.splice(lastImportLine + 1, 0, statement);
+                const needsCR = lines[lastImportLine].endsWith("\\r");
+                const statementToInsert = needsCR && !statement.endsWith("\\r") ? statement + "\\r" : statement;
+                lines.splice(lastImportLine + 1, 0, statementToInsert);
                 return lines.join('\\n');
             }
-            return statement + "\\n" + content;
+            return statement + predominantLineEnding + content;
+        }
+
+        function escapeRegExpClient(string) {
+            return string.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+        }
+
+        function clientFindAll(content, anchor) {
+            anchor = String(anchor || "");
+            if (!anchor) throw new Error("find anchor cannot be empty.");
+
+            const escapedAnchor = escapeRegExpClient(anchor.replace(/\\r\\n/g, "\\n"));
+            const regexSource = escapedAnchor.replace(/\\\\n/g, '\\\\r?\\\\n');
+            const regex = new RegExp(regexSource, 'g');
+
+            const positions = [];
+            let match;
+            while ((match = regex.exec(content)) !== null) {
+                positions.push({ index: match.index, length: match[0].length });
+                if (match[0].length === 0) regex.lastIndex++;
+            }
+            return positions;
+        }
+
+        function clientDiagnoseFailedFind(content, anchor) {
+            const hints = [];
+            const contentNorm = content.replace(/\\r\\n/g, "\\n");
+            const anchorNorm = String(anchor || "").replace(/\\r\\n/g, "\\n");
+
+            const normalizeWS = s => String(s || "").replace(/[ \\t]+/g, " ").replace(/^[ \\t]+/gm, "").trim();
+            if (normalizeWS(contentNorm).includes(normalizeWS(anchorNorm))) {
+                hints.push("Whitespace-normalized version WAS found — likely wrong indentation or tabs vs spaces.");
+            }
+            const anchorLines = anchorNorm.split("\\n").map(l => l.trim()).filter(Boolean);
+            if (anchorLines.length > 0) {
+                const firstLine = anchorLines[0];
+                const lineNums = contentNorm.split("\\n")
+                    .map((l, i) => l.includes(firstLine) ? i + 1 : null)
+                    .filter(Boolean);
+                if (lineNums.length > 0) hints.push(\`First anchor line found at line(s): \${lineNums.slice(0, 5).join(", ")} — mismatch is in following lines.\`);
+                else hints.push("First anchor line NOT found in file — anchor may reference already-changed or nonexistent code.");
+            }
+            if (anchorNorm.split("\\n").length > 4) hints.push(\`Anchor is \${anchorNorm.split("\\n").length} lines long — consider a shorter 1–2 line anchor.\`);
+            return hints;
         }
 
         function clientSelectMatches(content, anchor, occurrence) {
-            const matches = [];
-            let idx = content.indexOf(anchor);
-            while (idx !== -1) {
-                matches.push(idx);
-                idx = content.indexOf(anchor, idx + anchor.length);
+            const matches = clientFindAll(content, anchor);
+            if (matches.length === 0) {
+                const preview = anchor.length > 80 ? anchor.slice(0, 80) + "…" : anchor;
+                const hints = clientDiagnoseFailedFind(content, anchor);
+                const hintsText = hints.length > 0 ? "\\n\\nHints:\\n" + hints.map(h => "  • " + h).join("\\n") : "";
+                throw new Error(\`Anchor not found: \${JSON.stringify(preview)}\${hintsText}\`);
             }
-            if (matches.length === 0) throw new Error(\`Anchor text "\${anchor}" not found.\`);
-            
-            if (occurrence === "unique") {
-                if (matches.length !== 1) throw new Error(\`Expected exactly 1 occurrence, found \${matches.length}.\`);
+            if (occurrence === "unique" || occurrence === null || occurrence === undefined) {
+                if (matches.length !== 1) {
+                    const lineNums = matches.map(m => content.slice(0, m.index).split("\\n").length);
+                    throw new Error(\`Expected unique match, found \${matches.length} occurrences at line(s): \${lineNums.join(", ")}. Use "occurrence": 1, 2, … or "all".\`);
+                }
                 return [matches[0]];
             }
             if (occurrence === "all") return matches;
-            
             const num = Number(occurrence);
-            if (Number.isInteger(num) && num >= 1 && num <= matches.length) {
-                return [matches[num - 1]];
-            }
-            throw new Error(\`Invalid occurrence: \${occurrence}\`);
+            if (Number.isInteger(num) && num >= 1 && num <= matches.length) return [matches[num - 1]];
+            throw new Error(\`Invalid occurrence: \${JSON.stringify(occurrence)}. Use "unique", "all", or integer 1–\${matches.length}.\`);
         }
 
         function clientGetLineOffsets(content, lineStart, lineEnd) {
             const lines = content.split('\\n');
             let start = 0;
-            for (let i = 0; i < lineStart - 1; i++) {
-                start += lines[i].length + 1;
-            }
+            for (let i = 0; i < lineStart - 1; i++) start += lines[i].length + 1;
             let end = start;
             for (let i = lineStart - 1; i < lineEnd; i++) {
                 end += lines[i].length;
